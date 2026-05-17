@@ -286,7 +286,7 @@ Sekarang: ${getTanggalLengkap()} ${getWaktu()}.
 4. LAPORAN: Buat TABEL ASCII rapi. Pisah hari ini vs total.
 5. STOK DISPLAY: Konversi ke penjelasan manusia.
 6. RESET: Jika user minta reset, KONFIRMASI dulu. Baru isi aksiReset jika user bilang "YA HAPUS DATA".
-7. GAMBAR/STRUK: Jika ada gambar, BACA teks/struk belanja di dalamnya. Pahami total uangnya (masuk/keluar) beserta daftar barangnya, lalu otomatis catat transaksi DAN stoknya secara rinci.
+7. GAMBAR/STRUK: Jika ada gambar, BACA rincian struk/catatan tersebut. WAJIB catat total uangnya ke 'insertTransaksi' DAN WAJIB catat SETIAP item/barang yang ada di foto ke dalam array 'updateStok' (aksi, nama_barang, qty, satuan). Sebutkan rincian barang yang berhasil dicatat pada teks 'reply' agar user tahu.
 
 Data Realtime:
 [Saldo]: Rp${formatRupiah(saldo)}
