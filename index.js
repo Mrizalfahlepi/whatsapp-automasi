@@ -69,11 +69,17 @@ async function smartReply(msg, text) {
         botSentMessages.add(text.trim());
         botSentMessages.add(tagged.trim());
         setTimeout(() => { botSentMessages.delete(text.trim()); botSentMessages.delete(tagged.trim()); }, 60000);
-        const chat = await msg.getChat();
-        await chat.sendSeen();
-        await chat.sendStateTyping();
-        await new Promise(r => setTimeout(r, 1500));
-        await chat.clearState();
+        // Typing indicator with timeout (prevents hang on LID numbers)
+        await Promise.race([
+            (async () => {
+                const chat = await msg.getChat();
+                await chat.sendSeen();
+                await chat.sendStateTyping();
+                await new Promise(r => setTimeout(r, 1500));
+                await chat.clearState();
+            })(),
+            new Promise(r => setTimeout(r, 5000)) // 5s timeout fallback
+        ]);
     } catch (e) { console.error('[TYPING ERROR]', e.message); }
     return msg.reply(`*_${config.NAMA_BISNIS}:_*\n${text}`);
 }
