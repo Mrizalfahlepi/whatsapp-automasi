@@ -229,6 +229,7 @@ async function handleWarungMessage(msg, phone, text, user) {
 
     // Handle media/struk
     let uploadedStruk = null;
+    let geminiImage = null;
     if (msg.hasMedia) {
         try {
             const media = await msg.downloadMedia();
@@ -236,9 +237,17 @@ async function handleWarungMessage(msg, phone, text, user) {
             const filename = `struk_${phone}_${ts}.jpg`;
             fs.writeFileSync(`${FOLDER_STRUK}/${filename}`, media.data, 'base64');
             uploadedStruk = filename;
-            if (!text) return smartReply(msg, `📷 Foto struk disimpan: *${filename}*\n\nBalas dengan format:\n*keluar [total] [keterangan]*\n\nAtau ketik bebas: "pengeluaran 20rb bensin"`);
+            geminiImage = {
+                inlineData: {
+                    data: media.data,
+                    mimeType: media.mimetype
+                }
+            };
         } catch (e) { console.error('[MEDIA ERROR]', e.message); }
     }
+
+    if (!text && !geminiImage) return; // Ignore if no text and no image
+
 
     // Fast path: masuk/keluar/+/-
     const rxFast = /^(\+|masuk|in|-|keluar|out)\s*(?:rp\.?\s*)?([0-9.,]+(?:\s*(?:juta|jt|ribu|rb|k|m))?)(?:\s+(.+))?$/i;
@@ -277,15 +286,17 @@ Sekarang: ${getTanggalLengkap()} ${getWaktu()}.
 4. LAPORAN: Buat TABEL ASCII rapi. Pisah hari ini vs total.
 5. STOK DISPLAY: Konversi ke penjelasan manusia.
 6. RESET: Jika user minta reset, KONFIRMASI dulu. Baru isi aksiReset jika user bilang "YA HAPUS DATA".
+7. GAMBAR/STRUK: Jika ada gambar, BACA teks/struk belanja di dalamnya. Pahami total uangnya (masuk/keluar) beserta daftar barangnya, lalu otomatis catat transaksi DAN stoknya secara rinci.
 
 Data Realtime:
 [Saldo]: Rp${formatRupiah(saldo)}
 [Stok]: ${JSON.stringify(stokObj)}
 [Transaksi Terakhir]: ${JSON.stringify(recentTrx.slice(0, 40))}
 
-Chat dari ${user.owner_name}: "${text}"`;
+Chat dari ${user.owner_name}: "${text || '[Mengirim Gambar/Struk]'}"`;
 
-        const result = await geminiModel.generateContent(prompt);
+        const requestContent = geminiImage ? [prompt, geminiImage] : prompt;
+        const result = await geminiModel.generateContent(requestContent);
         const res = JSON.parse(result.response.text());
 
         // Process reset
