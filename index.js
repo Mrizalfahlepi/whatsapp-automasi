@@ -2,424 +2,414 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const moment = require('moment-timezone');
-const cron = require('node-cron');
 const config = require('./config');
+const db = require('./supabase');
+const { GoogleGenerativeAI, SchemaType } = require('@google/generative-ai');
 
-const { GoogleGenerativeAI, SchemaType } = require("@google/generative-ai");
+// ═══ GEMINI AI SETUP ═══
 const genAI = config.GEMINI_API_KEY ? new GoogleGenerativeAI(config.GEMINI_API_KEY) : null;
 let geminiModel = null;
-
 if (genAI) {
     geminiModel = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash",
+        model: 'gemini-2.5-flash',
         generationConfig: {
-            temperature: 0.2, // Supaya AI tidak berkhayal dan logis
-            responseMimeType: "application/json",
+            temperature: 0.2,
+            responseMimeType: 'application/json',
             responseSchema: {
                 type: SchemaType.OBJECT,
                 properties: {
-                    insertTransaksi: {
-                        type: SchemaType.ARRAY,
-                        items: {
-                            type: SchemaType.OBJECT,
-                            properties: {
-                                tipe: { type: SchemaType.STRING, description: "'masuk' atau 'keluar'" },
-                                jumlah: { type: SchemaType.NUMBER },
-                                ket: { type: SchemaType.STRING }
-                            },
-                            required: ["tipe", "jumlah", "ket"]
-                        }
-                    },
-                    updateStok: {
-                        type: SchemaType.ARRAY,
-                        items: {
-                            type: SchemaType.OBJECT,
-                            properties: {
-                                aksi: { type: SchemaType.STRING, description: "'tambah' atau 'kurang'" },
-                                nama_barang: { type: SchemaType.STRING },
-                                qty: { type: SchemaType.NUMBER },
-                                satuan: { type: SchemaType.STRING, description: "Contoh: pcs, kardus, pak, renteng, dll" }
-                            },
-                            required: ["aksi", "nama_barang", "qty", "satuan"]
-                        }
-                    },
-                    aksiReset: {
-                         type: SchemaType.STRING,
-                         description: "HANYA diisi 'RESET_HARIAN' atau 'RESET_TOTAL' jika user tegas berkata YAKIN HAPUS. Kosongkan apabila sekadar tanya atau belum konfirmasi."
-                    },
-                    reply: {
-                        type: SchemaType.STRING,
-                        description: "Balasan text. Gunakan bahasa kasir asik, pakai tabel rapi (====, |) bila diminta rekap/laporan. Bila user beli borongan tanpa detail, wajib ditanya balik pakai string ini."
-                    }
+                    insertTransaksi: { type: SchemaType.ARRAY, items: { type: SchemaType.OBJECT, properties: {
+                        tipe: { type: SchemaType.STRING, description: "'masuk' atau 'keluar'" },
+                        jumlah: { type: SchemaType.NUMBER },
+                        ket: { type: SchemaType.STRING }
+                    }, required: ['tipe', 'jumlah', 'ket'] }},
+                    updateStok: { type: SchemaType.ARRAY, items: { type: SchemaType.OBJECT, properties: {
+                        aksi: { type: SchemaType.STRING, description: "'tambah' atau 'kurang'" },
+                        nama_barang: { type: SchemaType.STRING },
+                        qty: { type: SchemaType.NUMBER },
+                        satuan: { type: SchemaType.STRING }
+                    }, required: ['aksi', 'nama_barang', 'qty', 'satuan'] }},
+                    aksiReset: { type: SchemaType.STRING, description: "HANYA 'RESET_HARIAN' atau 'RESET_TOTAL' jika user tegas YAKIN HAPUS. Kosongkan jika belum konfirmasi." },
+                    reply: { type: SchemaType.STRING, description: "Balasan teks ke user. Gunakan bahasa kasir santuy, tabel rapi jika diminta rekap." }
                 },
-                required: ["reply"]
+                required: ['reply']
             }
         }
     });
 }
 
+// ═══ WHATSAPP CLIENT ═══
+const os = require('os');
+const isWindows = os.platform() === 'win32';
+const chromePaths = isWindows
+    ? ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe']
+    : ['/usr/bin/google-chrome', '/usr/bin/chromium-browser', '/usr/bin/chromium'];
+const chromePath = chromePaths.find(p => { try { return fs.existsSync(p); } catch { return false; } });
+
 const client = new Client({
     authStrategy: new LocalAuth(),
-    puppeteer: {
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
-    }
+    puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'], ...(chromePath ? { executablePath: chromePath } : {}) }
 });
 
-const DB_FILE = config.FILE_DATABASE;
-const NOMOR_ADMIN = config.NOMOR_ADMIN + '@c.us';
-const FOLDER_STRUK = config.FOLDER_STRUK;
+const ADMIN_ID = config.NOMOR_ADMIN + '@c.us';
 const TZ = config.TIMEZONE || 'Asia/Jakarta';
-const BACKUP_TXT = config.FILE_BACKUP_TXT || './laporan_database.txt';
+const FOLDER_STRUK = config.FOLDER_STRUK || './struk';
+if (!fs.existsSync(FOLDER_STRUK)) fs.mkdirSync(FOLDER_STRUK, { recursive: true });
 
-if (!fs.existsSync(FOLDER_STRUK)) fs.mkdirSync(FOLDER_STRUK);
-let db = { transaksi: [], stok: {} };
-const botSentMessages = new Set(); // ANTI-LOOP SYSTEM
-const knownSelfChatIds = new Set(); // Cache ID Saved Messages yang sudah tervalidasi
-
-if (fs.existsSync(DB_FILE)) {
-    const raw = JSON.parse(fs.readFileSync(DB_FILE));
-    db.transaksi = raw.transaksi || [];
-    db.stok = raw.stok || {};
-}
-
-const formatRupiah = (angka) => new Intl.NumberFormat('id-ID').format(angka);
+const botSentMessages = new Set();
+const formatRupiah = (n) => new Intl.NumberFormat('id-ID').format(n);
 const getTanggal = () => moment().tz(TZ).format('YYYY-MM-DD');
 const getTanggalLengkap = () => moment().tz(TZ).format('dddd, DD MMMM YYYY');
-const getWaktu = () => moment().tz(TZ).format('HH:mm WIB');
-const hitungSaldo = () => db.transaksi.reduce((a, b) => a + (b.tipe === 'masuk' ? b.jumlah : -b.jumlah), 0);
+const getWaktu = () => moment().tz(TZ).format('HH:mm [WIB]');
 
-const saveDB = () => {
+// ═══ HELPER: Smart Reply with typing indicator ═══
+async function smartReply(msg, text) {
     try {
-        fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
-        
-        // BACKUP DB SEBAGAI TXT (Sesuai Permintaan)
-        let txtDump = `======================================\n`;
-        txtDump += `   DATABASE KASIR & STOK - BACKUP TXT\n`;
-        txtDump += `   Update: ${getTanggalLengkap()} ${getWaktu()}\n`;
-        txtDump += `======================================\n\n`;
-        
-        txtDump += `[ SALDO TOTAL BERJALAN ]\n`;
-        txtDump += `Rp ${formatRupiah(hitungSaldo())}\n\n`;
-        
-        txtDump += `[ SISA INVENTARIS STOK (GUDANG) ]\n`;
-        const keys = Object.keys(db.stok);
-        if(keys.length === 0) txtDump += `- Kosong\n`;
-        else keys.forEach(k => { txtDump += `- ${db.stok[k].nama.toUpperCase()}: ${db.stok[k].qty} ${db.stok[k].satuan}\n`; });
-        
-        txtDump += `\n[ HISTORI TRANSAKSI ]\n`;
-        if(db.transaksi.length === 0) txtDump += `- Belum ada data transaksi\n`;
-        else db.transaksi.forEach((t, i) => { txtDump += `${i+1}. ${t.tanggal} | [${t.tipe.toUpperCase()}] Rp${formatRupiah(t.jumlah)} - ${t.ket}\n`; });
-        
-        fs.writeFileSync(BACKUP_TXT, txtDump, 'utf8');
-    } catch (e) {
-        console.error('[SAVE DB ERROR]', e.message);
-    }
-};
-saveDB(); // Run 1x untuk bikin file txt
+        const tagged = `*_${config.NAMA_BISNIS}:_*\n${text}`;
+        botSentMessages.add(text.trim());
+        botSentMessages.add(tagged.trim());
+        setTimeout(() => { botSentMessages.delete(text.trim()); botSentMessages.delete(tagged.trim()); }, 60000);
+        const chat = await msg.getChat();
+        await chat.sendSeen();
+        await chat.sendStateTyping();
+        await new Promise(r => setTimeout(r, 1500));
+        await chat.clearState();
+    } catch (e) { console.error('[TYPING ERROR]', e.message); }
+    return msg.reply(`*_${config.NAMA_BISNIS}:_*\n${text}`);
+}
 
+// ═══ HELPER: Normalize phone number ═══
+function normalizePhone(input) {
+    let p = input.replace(/[^0-9]/g, '');
+    if (p.startsWith('08')) p = '62' + p.substring(1);
+    if (p.startsWith('+62')) p = '62' + p.substring(3);
+    return p;
+}
+
+// ═══ HELPER: Parse nominal ═══
+function parseNominal(str) {
+    let s = str.toLowerCase().replace(/\s/g, '');
+    if (s.includes('juta') || s.includes('jt') || s.includes('m')) return parseFloat(s.replace(/juta|jt|m/g, '').replace(/\./g, '').replace(/,/g, '.')) * 1000000;
+    if (s.includes('ribu') || s.includes('rb') || s.includes('k')) return parseFloat(s.replace(/ribu|rb|k/g, '').replace(/\./g, '').replace(/,/g, '.')) * 1000;
+    return Math.round(parseFloat(s.replace(/\./g, '').replace(/,/g, '.')));
+}
+
+// ═══ ADMIN COMMANDS HANDLER ═══
+async function handleAdminCommand(msg, text) {
+    const parts = text.split(/\s+/);
+    const cmd = parts[0].toLowerCase();
+
+    if (cmd === '#list') {
+        const users = await db.getAllUsers();
+        if (users.length === 0) return smartReply(msg, '📋 Belum ada warung terdaftar.');
+        let reply = `📋 *DAFTAR WARUNG* (${users.length})\n━━━━━━━━━━━━━━━━━━━━━\n`;
+        for (const u of users) {
+            const active = db.isUserActive(u);
+            const icon = active ? '🟢' : (u.status === 'banned' ? '⛔' : '🔴');
+            reply += `${icon} *${u.store_name}*\n   ${u.phone} | ${u.owner_name}\n   Status: ${u.status} | ${active ? 'Aktif' : 'Expired'}\n\n`;
+        }
+        return smartReply(msg, reply);
+    }
+
+    if (cmd === '#info' && parts[1]) {
+        const phone = normalizePhone(parts[1]);
+        const user = await db.getUser(phone);
+        if (!user) return smartReply(msg, `❌ Warung ${phone} tidak ditemukan.`);
+        const saldo = await db.getSaldo(phone);
+        const trx = await db.getTransactions(phone);
+        const stok = await db.getStock(phone);
+        let reply = `📊 *INFO WARUNG*\n━━━━━━━━━━━━━━━━━━━━━\n`;
+        reply += `🏪 *${user.store_name}*\n👤 ${user.owner_name}\n📱 ${user.phone}\n`;
+        reply += `📌 Status: ${user.status}\n`;
+        reply += `⏰ Trial: ${user.trial_end ? moment(user.trial_end).format('DD MMM YYYY') : '-'}\n`;
+        reply += `💳 Bayar s/d: ${user.paid_until ? moment(user.paid_until).format('DD MMM YYYY') : '-'}\n`;
+        reply += `💰 Saldo: Rp${formatRupiah(saldo)}\n📝 Transaksi: ${trx.length}\n📦 Item stok: ${stok.length}`;
+        return smartReply(msg, reply);
+    }
+
+    if (cmd === '#aktifkan' && parts[1]) {
+        const phone = normalizePhone(parts[1]);
+        const user = await db.getUser(phone);
+        if (!user) return smartReply(msg, `❌ Warung ${phone} tidak ditemukan.`);
+        const days = parseInt(parts[2]) || 30;
+        const paidUntil = moment().tz(TZ).add(days, 'days').toISOString();
+        await db.updateUserStatus(phone, 'active', paidUntil);
+        return smartReply(msg, `✅ *${user.store_name}* (${phone}) diaktifkan ${days} hari.\nAktif sampai: ${moment(paidUntil).format('DD MMM YYYY')}`);
+    }
+
+    if (cmd === '#trial' && parts[1]) {
+        const phone = normalizePhone(parts[1]);
+        const user = await db.getUser(phone);
+        if (!user) return smartReply(msg, `❌ Warung ${phone} tidak ditemukan.`);
+        const trialEnd = moment().tz(TZ).add(config.TRIAL_HARI || 7, 'days').toISOString();
+        await db.supabase.from('users').update({ status: 'trial', trial_end: trialEnd, updated_at: new Date().toISOString() }).eq('phone', phone);
+        return smartReply(msg, `✅ Trial *${user.store_name}* (${phone}) direset ${config.TRIAL_HARI || 7} hari.`);
+    }
+
+    if (cmd === '#ban' && parts[1]) {
+        const phone = normalizePhone(parts[1]);
+        const user = await db.getUser(phone);
+        if (!user) return smartReply(msg, `❌ Warung ${phone} tidak ditemukan.`);
+        await db.updateUserStatus(phone, 'banned');
+        return smartReply(msg, `⛔ *${user.store_name}* (${phone}) diblokir.`);
+    }
+
+    if (cmd === '#hapus' && parts[1]) {
+        const phone = normalizePhone(parts[1]);
+        const user = await db.getUser(phone);
+        if (!user) return smartReply(msg, `❌ Warung ${phone} tidak ditemukan.`);
+        await db.deleteUser(phone);
+        return smartReply(msg, `🗑️ *${user.store_name}* (${phone}) dihapus total (user + transaksi + stok).`);
+    }
+
+    return false;
+}
+
+// ═══ REGISTRATION FLOW HANDLER ═══
+async function handleRegistration(msg, phone, text, session) {
+    const state = session?.state;
+
+    if (!state || state === 'idle' || state === 'active') {
+        if (text.toLowerCase() === 'daftar') {
+            await db.setSession(phone, 'reg_store');
+            return smartReply(msg, `📝 *Pendaftaran ${config.NAMA_BISNIS}*\n\nLangkah 1/3\nKirimkan *Nama Toko* kamu:\n\n_Contoh: Warung Berkah Bu Amin_`);
+        }
+        return null;
+    }
+
+    if (state === 'reg_store') {
+        await db.setSession(phone, 'reg_owner', { store_name: text.trim() });
+        return smartReply(msg, `✅ Nama toko: *${text.trim()}*\n\nLangkah 2/3\nSekarang kirim *Nama Pemilik*:\n\n_Contoh: Bu Amin_`);
+    }
+
+    if (state === 'reg_owner') {
+        const prevData = session?.data || {};
+        await db.setSession(phone, 'reg_pin', { ...prevData, owner_name: text.trim() });
+        return smartReply(msg, `✅ Nama pemilik: *${text.trim()}*\n\nLangkah 3/3\nBuat *PIN 6 digit* untuk login di website:\n\n_Contoh: 123456_`);
+    }
+
+    if (state === 'reg_pin') {
+        const pin = text.replace(/\D/g, '');
+        if (pin.length < 4 || pin.length > 8) {
+            return smartReply(msg, '❌ PIN harus 4-8 digit angka. Coba lagi:');
+        }
+        const temp = session?.data || {};
+        try {
+            await db.registerUser(phone, temp.store_name || 'Toko Baru', temp.owner_name || 'Owner', pin);
+            await db.setSession(phone, 'active', null);
+            const trialEnd = moment().tz(TZ).add(config.TRIAL_HARI || 7, 'days').format('DD MMMM YYYY');
+            return smartReply(msg, `🎉 *Pendaftaran Berhasil!*\n━━━━━━━━━━━━━━━━━━━━━\n🏪 Toko: *${temp.store_name}*\n👤 Pemilik: *${temp.owner_name}*\n🔑 PIN: *${pin}*\n⏰ Trial GRATIS sampai: *${trialEnd}*\n\n📌 Kamu juga bisa login di:\n🌐 ${config.WEBSITE}/kasir\n\nMulai sekarang, langsung chat untuk catat penjualan!\n_Contoh: masuk 50k jual rokok_`);
+        } catch (err) {
+            console.error('[REG ERROR]', err);
+            if (err.code === '23505') return smartReply(msg, '❌ Nomor ini sudah terdaftar!');
+            return smartReply(msg, '❌ Gagal mendaftar. Coba lagi nanti.');
+        }
+    }
+
+    return null;
+}
+
+// ═══ WARUNG TRANSACTION HANDLER ═══
+async function handleWarungMessage(msg, phone, text, user) {
+    const hariIni = getTanggal();
+
+    // Handle media/struk
+    let uploadedStruk = null;
+    if (msg.hasMedia) {
+        try {
+            const media = await msg.downloadMedia();
+            const ts = moment().tz(TZ).format('YYYYMMDD_HHmmss');
+            const filename = `struk_${phone}_${ts}.jpg`;
+            fs.writeFileSync(`${FOLDER_STRUK}/${filename}`, media.data, 'base64');
+            uploadedStruk = filename;
+            if (!text) return smartReply(msg, `📷 Foto struk disimpan: *${filename}*\n\nBalas dengan format:\n*keluar [total] [keterangan]*\n\nAtau ketik bebas: "pengeluaran 20rb bensin"`);
+        } catch (e) { console.error('[MEDIA ERROR]', e.message); }
+    }
+
+    // Fast path: masuk/keluar/+/-
+    const rxFast = /^(\+|masuk|in|-|keluar|out)\s*(?:rp\.?\s*)?([0-9.,]+(?:\s*(?:juta|jt|ribu|rb|k|m))?)(?:\s+(.+))?$/i;
+    const match = text.match(rxFast);
+    if (match) {
+        const cmd = match[1].toLowerCase();
+        const tipe = ['+', 'masuk', 'in'].includes(cmd) ? 'masuk' : 'keluar';
+        const jumlah = parseNominal(match[2]);
+        const ket = match[3] || '-';
+        if (isNaN(jumlah) || jumlah <= 0) return smartReply(msg, `❌ Nominal tidak valid.\nContoh: *${cmd} 50k jual rokok*`);
+        await db.insertTransaction(phone, tipe, jumlah, ket);
+        const saldo = await db.getSaldo(phone);
+        let reply = `✅ ${tipe === 'masuk' ? '💰 Pemasukan' : '💸 Pengeluaran'} dicatat\n*Rp${formatRupiah(jumlah)}* — ${ket}`;
+        if (uploadedStruk) reply += ` 📷`;
+        reply += `\n\n💰 Saldo: *Rp${formatRupiah(saldo)}*`;
+        return smartReply(msg, reply);
+    }
+
+    // AI Path: Gemini
+    if (!geminiModel) return smartReply(msg, '❌ AI tidak tersedia. Gunakan format manual:\n*masuk 50k jual rokok*');
+
+    try {
+        const saldo = await db.getSaldo(phone);
+        const recentTrx = await db.getTransactions(phone);
+        const stokData = await db.getStock(phone);
+        const stokObj = {};
+        stokData.forEach(s => { stokObj[`${s.nama_barang}__${s.satuan}`] = { nama: s.nama_barang, satuan: s.satuan, qty: s.qty }; });
+
+        const prompt = `Anda adalah "KasirBot", asisten kasir cerdas untuk "${user.store_name}". Owner bernama "${user.owner_name}". Anda santuy tapi AKURAT. Paham bahasa gaul, Sunda, Jawa, Madura, Melayu, dll.
+Sekarang: ${getTanggalLengkap()} ${getWaktu()}.
+
+--- ATURAN KETAT ---
+1. PENJUALAN: Jika user jual barang, masukkan "masuk" dan KURANGI stok.
+2. PEMBELIAN STOK: Jika user kulakan, "keluar" uang dan TAMBAH stok.
+3. JIKA TIDAK JELAS: Tanya balik di "reply", JANGAN entry data.
+4. LAPORAN: Buat TABEL ASCII rapi. Pisah hari ini vs total.
+5. STOK DISPLAY: Konversi ke penjelasan manusia.
+6. RESET: Jika user minta reset, KONFIRMASI dulu. Baru isi aksiReset jika user bilang "YA HAPUS DATA".
+
+Data Realtime:
+[Saldo]: Rp${formatRupiah(saldo)}
+[Stok]: ${JSON.stringify(stokObj)}
+[Transaksi Terakhir]: ${JSON.stringify(recentTrx.slice(0, 40))}
+
+Chat dari ${user.owner_name}: "${text}"`;
+
+        const result = await geminiModel.generateContent(prompt);
+        const res = JSON.parse(result.response.text());
+
+        // Process reset
+        if (res.aksiReset === 'RESET_TOTAL') {
+            await db.deleteTransactions(phone);
+            await db.deleteStock(phone);
+        } else if (res.aksiReset === 'RESET_HARIAN') {
+            await db.supabase.from('transactions').delete().eq('user_phone', phone).eq('tanggal', hariIni);
+        }
+
+        // Process transactions
+        if (res.insertTransaksi && res.insertTransaksi.length > 0) {
+            for (const trx of res.insertTransaksi) {
+                await db.insertTransaction(phone, trx.tipe === 'masuk' ? 'masuk' : 'keluar', Number(trx.jumlah) || 0, trx.ket || '');
+            }
+        }
+
+        // Process stock
+        if (res.updateStok && res.updateStok.length > 0) {
+            for (const stk of res.updateStok) {
+                await db.upsertStock(phone, stk.nama_barang, stk.qty, stk.satuan, stk.aksi);
+            }
+        }
+
+        if (res.reply) return smartReply(msg, res.reply);
+    } catch (err) {
+        console.error('[GEMINI ERROR]', err.message);
+        return smartReply(msg, '❌ Error AI. Coba format manual:\n*masuk 50k jual rokok*');
+    }
+}
+
+// ═══ WHATSAPP EVENTS ═══
 client.on('qr', (qr) => {
     fs.writeFileSync('qr.txt', qr);
-    console.log(`SCAN QR INI PAKE WA BOT/PELAYAN (Nomor Admin: ${config.NOMOR_ADMIN}):`);
+    console.log(`\nSCAN QR CODE INI PAKAI WA BISNIS (${config.NOMOR_ADMIN}):`);
     qrcode.generate(qr, { small: true });
 });
 
-client.on('ready', async () => {
-    console.log('✅ Bot Keuangan Toko Siap! Login sebagai:', client.info.pushname);
-    console.log('   Bot WID:', client.info.wid._serialized);
-    // Pre-cache: Tambahkan adminId sendiri ke known self chat IDs
-    knownSelfChatIds.add(NOMOR_ADMIN);
-    knownSelfChatIds.add(client.info.wid._serialized);
+client.on('ready', () => {
+    console.log(`\n✅ ${config.NAMA_BISNIS} Bot Siap!`);
+    console.log(`   Login: ${client.info.pushname}`);
+    console.log(`   WID: ${client.info.wid._serialized}`);
+    console.log(`   Admin: ${config.NOMOR_ADMIN}\n`);
 });
 
-client.on('auth_failure', msg => { console.error('AUTH GAGAL:', msg); });
-client.on('disconnected', (reason) => { console.log('Client terputus:', reason); });
+client.on('auth_failure', msg => console.error('AUTH GAGAL:', msg));
+client.on('disconnected', reason => console.log('Terputus:', reason));
 
+// ═══ HANDLE ADMIN MESSAGES (Saved Messages / Self-chat) ═══
 client.on('message_create', async msg => {
-    if (msg.body && botSentMessages.has(msg.body.trim())) return; // ANTI-LOOP FILTER
-
-    const originalReply = msg.reply.bind(msg);
-    msg.reply = async (text) => {
-        try {
-            if (text) {
-                botSentMessages.add(text.trim());
-                setTimeout(() => botSentMessages.delete(text.trim()), 60000);
-            }
-            const chat = await msg.getChat();
-            await new Promise(r => setTimeout(r, 1000));
-            await chat.sendSeen();
-            await new Promise(r => setTimeout(r, 1000));
-            await chat.sendStateTyping();
-            await new Promise(r => setTimeout(r, 2000)); 
-            await chat.clearState();
-        } catch (e) {
-            console.error("Gagal meniru manusia:", e);
-        }
-        return originalReply(text);
-    };
-    
-    // ===================== FILTER KEAMANAN =====================
-    const adminId = NOMOR_ADMIN; // "6282159895420@c.us"
-    
-    // 1) Blokir pesan yang bukan dari akun sendiri
-    if (!msg.fromMe) return;
-    
-    // 2) Blokir grup
+    if (!msg.fromMe || !msg.body) return;
+    if (botSentMessages.has(msg.body.trim())) return;
     if (msg.to.endsWith('@g.us')) return;
-    
-    // 3) Blokir pesan ke kontak @c.us lain (selain diri sendiri)
-    if (msg.to.endsWith('@c.us') && msg.to !== adminId) return;
-    
-    // 4) Untuk pesan ke @lid: cek apakah ini Saved Messages (diri sendiri) atau chat teman
-    if (msg.to.endsWith('@lid')) {
-        if (!knownSelfChatIds.has(msg.to)) {
-            // ID ini belum dikenal, cek via getChat() satu kali saja
+
+    // Only process self-chat (Saved Messages)
+    const myWid = client.info.wid._serialized;
+    const isSelfChat = msg.to === ADMIN_ID || msg.to === myWid;
+    if (!isSelfChat) {
+        // Check if it's a @lid self-chat
+        if (msg.to.endsWith('@lid')) {
             try {
                 const chat = await msg.getChat();
-                // Di Saved Messages: chat.name biasanya "You" atau nama akun sendiri
-                // atau chat.id.user sama dengan nomor kita
-                const myNumber = client.info.wid.user; // "6282159895420"
-                const chatNumber = chat.id?.user || '';
                 const chatName = (chat.name || '').toLowerCase();
                 const myName = (client.info.pushname || '').toLowerCase();
-                
-                const isSelf = chatNumber === myNumber 
-                    || chatName === 'you' 
-                    || chatName === 'me'
-                    || chatName === myName
-                    || chat.id?._serialized === adminId
-                    || msg.to === client.info.wid._serialized;
-                
-                if (isSelf) {
-                    knownSelfChatIds.add(msg.to); // Cache biar next time langsung lolos
-                    console.log(`[CACHE] ${msg.to} terdeteksi sebagai self-chat. Di-cache.`);
-                } else {
-                    console.log(`[BLOKIR] Pesan ke ${msg.to} (${chat.name}) bukan self-chat.`);
-                    return;
-                }
-            } catch(e) {
-                console.error('[FILTER ERROR]', e.message);
-                return;
-            }
-        }
+                if (chatName !== 'you' && chatName !== 'me' && chatName !== myName) return;
+            } catch { return; }
+        } else return;
     }
-    
-    console.log(`[+] DIPROSES -> Dari: ${msg.from} | Ke: ${msg.to} | Teks: ${msg.body}`);
 
     const text = msg.body.trim();
-    const textLower = text.toLowerCase();
-    const hariIni = getTanggal();
-
-    try {
-        let uploadedStruk = null;
-        if (msg.hasMedia) {
-            const media = await msg.downloadMedia();
-            const timestamp = moment().tz('Asia/Jakarta').format('YYYYMMDD_HHmmss');
-            const filename = `struk_${timestamp}.jpg`;
-            fs.writeFileSync(`${FOLDER_STRUK}/${filename}`, media.data, 'base64');
-            uploadedStruk = filename;
-            
-            if (!text) {
-                await msg.reply(`📷 Foto struk disimpan: *${filename}*\n\nSekarang *balas pesan ini* dengan format:\n*keluar [total] [keterangan]*\n\nAtau gunakan AI (misal: "tadi pengeluaran bensin 20ribu")`);
-                return;
-            }
-        }
-
-        // Fast path untuk basic syntax: "masuk 50k jual bensin" supaya super cepat
-        const rxFastPath = /^(\+|masuk|in|\-|keluar|out)\s+([0-9.,]+(?:[ \t]*(?:juta|jt|ribu|rb|k|m))?)(?:[ \t]+(.*))?$/i;
-        const matchFastPath = text.match(rxFastPath);
-        
-        if (matchFastPath) {
-            const cmd = matchFastPath[1].toLowerCase();
-            const tipe = ['+', 'masuk', 'in'].includes(cmd) ? 'masuk' : 'keluar';
-            
-            let amountStr = matchFastPath[2];
-            let ket = matchFastPath[3] || '-';
-
-            let numStr = amountStr.toLowerCase().replace(/\s/g, '');
-            let jumlah = NaN;
-            if (numStr.includes('juta') || numStr.includes('jt') || numStr.includes('m')) {
-                jumlah = parseFloat(numStr.replace(/juta|jt|m/g, '').replace(/\./g, '').replace(/,/g, '.')) * 1000000;
-            } else if (numStr.includes('ribu') || numStr.includes('rb') || numStr.includes('k')) {
-                jumlah = parseFloat(numStr.replace(/ribu|rb|k/g, '').replace(/\./g, '').replace(/,/g, '.')) * 1000;
-            } else {
-                jumlah = Math.round(parseFloat(numStr.replace(/\./g, '').replace(/,/g, '.')));
-            }
-
-            if (isNaN(jumlah) || jumlah <= 0) return msg.reply(`❌ Nominal manual tidak valid 🤔\nContoh: *${cmd} 50k cemilan*`);
-
-            let namaFileStruk = uploadedStruk;
-            if (!namaFileStruk && tipe === 'keluar' && msg.hasQuotedMsg) {
-                const quoted = await msg.getQuotedMessage();
-                if (quoted.body) {
-                    const matchFilename = quoted.body.match(/struk_\d{8}_\d{6}\.jpg/i);
-                    if (matchFilename) namaFileStruk = matchFilename[0];
-                }
-                if (!namaFileStruk && quoted.hasMedia) {
-                    const files = fs.readdirSync(FOLDER_STRUK).sort();
-                    if (files.length > 0) namaFileStruk = files[files.length - 1];
-                }
-            }
-
-            db.transaksi.push({ tipe, jumlah, ket, tanggal: hariIni, id: Date.now(), struk: namaFileStruk });
-            saveDB();
-
-            let reply = `✅ ${tipe === 'masuk' ? 'Pemasukan' : 'Pengeluaran'} dicatat\n${formatRupiah(jumlah)} - ${ket}`;
-            if (namaFileStruk) reply += ` 📷`;
-            reply += `\nSaldo: Rp${formatRupiah(hitungSaldo())}`;
-            msg.reply(reply);
-        }
-
-        // HAK PENUH DIBERIKAN KEPADA GEMINI AI (TERMASUK LAPORAN, STOK, RESET DATA, DLL)
-        else {
-            if (geminiModel) {
-               const recentTrx = db.transaksi.slice(-40);
-               const prompt = `Anda adalah "KasirBot", asisten kasir cerdas untuk "${config.NAMA_TOKO || 'Toko Kelontong'}". Owner bernama "${config.NAMA_OWNER || 'Bos'}". Anda santuy tapi AKURAT. Anda paham bahasa gaul, Sunda, Jawa ngoko/krama, Madura, Melayu, dll.
-Sekarang: ${getTanggalLengkap()} ${getWaktu()}.
-
---- ATURAN SUPER KETAT ---
-1. TANGKAP PENJUALAN/KULAKAN: JIKA user bilang terjual (ex: "jual rokok 50rb"), masukkan sbg "masuk" (uang), dan pastikan KURANGI stok di "updateStok".
-2. TANGKAP PEMBELIAN STOK: JIKA user kulakan nambah barang (ex: "beli indomie kardus"), tambah isi stok "tambah" di "updateStok" dan potong uang "keluar" (kalo bayar uang).
-3. KONFIRMASI JIKA TEKS TIDAK JELAS: JIKA detail hilang (cth: "Beli mie indomie 1 kardus" TAPI harganya nggak ada, ATAU 1 kardusnya bakal di ecer tak bilang isi brp pcs), ANDA DILARANG ENTRY insertTransaksi / updateStok. Balas di text "reply" saja ngerocos pake logat manusia/daerah: "Duh punten, indomie harganya berapa? Trus sekardus isi berapa biji nih biar gampang direkap?".
-4. FORMAT LAPORAN/REKAP (HARI INI / TOTAL): Jika dimintai hasil / laporan harian / database dll, pamerkan kehebatanmu bikin TABEL ASCII pakai simbol ===, |, dll. Pastikan pisah tabel HARI INI vs LAPORAN TOTAL PERIODE kalau diminta. Tampilkan uang masuk/keluar dan rincian Sisa Stok.
-5. SISA STOK DISPLAY: AI yang bertugas mengonversi/menjelaskan "sisa 2 kardus 2 pcs" jika relevan murni dari akal sehat saat ngetik reply. Di database updateStok pecah murni aja.
-6. FITUR RESET / MENGHAPUS: JIKA user berkata "reset harian", "hapus data semua", atau mirip. Cek niatnya! JIKA user belum bilang YAKIN (hanya niat), cukup reply konfirmasi dengan peringatan keras. "Bro, yakin mau hapus data total? Ketik YA RESET TOTAL kalo yakin banget". JIKA mereka jawab YAKIN kuat, isi field \`aksiReset\` dengan "RESET_HARIAN" atau "RESET_TOTAL".
-
-Data Realtime Store saat ini Anda pegang (dibutuhkan agar balasanmu konkrit):
-[Saldo Store]: Rp${formatRupiah(hitungSaldo())}
-[DB Stok Saat Ini]: ${JSON.stringify(db.stok)}
-[DB Transaksi Berjalan]: ${JSON.stringify(recentTrx)}
-
-Chat terbaru dari Bos (User): "${text}"`;
-               
-               try {
-                   const result = await geminiModel.generateContent(prompt);
-                   const responseJSON = JSON.parse(result.response.text());
-                   let isDBSaved = false;
-
-                   // 1) HAPUS DATA KEUANGAN / RESET SYSTEM
-                   if (responseJSON.aksiReset === 'RESET_TOTAL') {
-                        db.transaksi = [];
-                        db.stok = {};
-                        isDBSaved = true;
-                   } else if (responseJSON.aksiReset === 'RESET_HARIAN') {
-                        db.transaksi = db.transaksi.filter(t => t.tanggal !== hariIni);
-                        // Logika sederhana reset stok harian agak pelik jika tak ada stempel waktu di stok. 
-                        // Anggap bot mereset transaksi uang saja.
-                        isDBSaved = true;
-                   }
-
-                   // 2) KELOLA KEUANGAN
-                   if (responseJSON.insertTransaksi && responseJSON.insertTransaksi.length > 0) {
-                       let offset = 0;
-                       for (const trx of responseJSON.insertTransaksi) {
-                            db.transaksi.push({
-                                tipe: trx.tipe === 'masuk' ? 'masuk' : 'keluar',
-                                jumlah: Number(trx.jumlah) || 0,
-                                ket: trx.ket || '',
-                                tanggal: hariIni,
-                                id: Date.now() + offset++,
-                                struk: null
-                            });
-                       }
-                       isDBSaved = true;
-                   }
-
-                   // 3) KELOLA STOK BARANG
-                   if (responseJSON.updateStok && responseJSON.updateStok.length > 0) {
-                        for (const stk of responseJSON.updateStok) {
-                             const key = `${stk.nama_barang.toLowerCase()}__${stk.satuan.toLowerCase()}`;
-                             if (!db.stok[key]) db.stok[key] = { nama: stk.nama_barang, satuan: stk.satuan, qty: 0 };
-                             
-                             if (stk.aksi === 'tambah') db.stok[key].qty += stk.qty;
-                             else if (stk.aksi === 'kurang') {
-                                 db.stok[key].qty -= stk.qty;
-                                 if (db.stok[key].qty < 0) db.stok[key].qty = 0; 
-                             }
-                        }
-                        isDBSaved = true;
-                   }
-
-                   if (isDBSaved) saveDB();
-                   if (responseJSON.reply) msg.reply(responseJSON.reply);
-
-               } catch (err) {
-                   console.error("Gemini Parse Error:", err);
-                   msg.reply("❌ Error memecah jawaban AI. Silakan modif omonganmu.");
-               }
-            }
-        }
-    } catch (e) {
-        console.error('Error handle message:', e);
-        msg.reply('❌ Terjadi error sistem (bukan AI). Coba lagi besok.');
+    if (text.startsWith('#')) {
+        console.log(`[ADMIN] ${text}`);
+        const handled = await handleAdminCommand(msg, text);
+        if (handled) return;
     }
 });
 
-// Parsing JAM_LAPORAN dari config (format 'HH:MM')
-const [jamLap, menitLap] = (config.JAM_LAPORAN || '00:00').split(':');
-const cronExpr = `${parseInt(menitLap)} ${parseInt(jamLap)} * * *`;
+// ═══ HANDLE INCOMING MESSAGES FROM WARUNG ═══
+client.on('message', async msg => {
+    if (!msg.body || msg.fromMe) return;
+    if (botSentMessages.has(msg.body.trim())) return;
+    if (msg.from.endsWith('@g.us')) return; // Ignore groups
 
-cron.schedule(cronExpr, async () => {
+    const phone = msg.from.replace('@c.us', '').replace('@lid', '');
+    const text = msg.body.trim();
+    console.log(`[MSG] ${phone}: ${text}`);
+
     try {
-        console.log('[CRON] Menjalankan pembuatan rekap malam...');
-        if (!geminiModel) return;
-        
-        // At 00:00, "kemarin" adalah data yg baru saja dilewati.
-        const dmyKemarin = moment().tz(TZ).subtract(1, 'minutes').format('dddd, DD MMMM YYYY');
-
-        const prompt = `Anda adalah "KasirBot" milik "${config.NAMA_TOKO || 'Toko Kelontong'}". System trigger: LAPORAN OTOMATIS. 
-Tulis laporan terstruktur untuk tanggal ${dmyKemarin}.
-Buatkan TABEL ASCII yang amat memukau bos Anda.
-1. Tabel 1: Laporan Khusus Hari Ini (Hari yg direkap).
-2. Tabel 2: Akumulasi semua Saldo Periode berjalan & Semua Sisa STOK GUDANG Gudang saat ini.
-
-Data untuk dianalisis:
-Stok Tersedia Saat ini: ${JSON.stringify(db.stok)}
-History: ${JSON.stringify(db.transaksi)}
-
-Masukkan desain ke dalam block balasan teks (reply). Jangan ada proses manipulasi database di json mu kali ini. Beri kata-kata puitis/hangat.`;
-
-        const result = await geminiModel.generateContent(prompt);
-        const responseJSON = JSON.parse(result.response.text());
-        
-        if (responseJSON.reply) {
-            botSentMessages.add(responseJSON.reply.trim());
-            setTimeout(() => botSentMessages.delete(responseJSON.reply.trim()), 60000);
-            await client.sendMessage(NOMOR_ADMIN, responseJSON.reply);
+        // Check session for registration flow
+        const session = await db.getSession(phone);
+        if (session && session.state && session.state.startsWith('reg_')) {
+            const handled = await handleRegistration(msg, phone, text, session);
+            if (handled) return;
         }
-    } catch(err) {
-        console.error("[CRON FAILED]", err);
-    }
-}, { timezone: TZ });
 
+        // Check user registration
+        const user = await db.getUser(phone);
+
+        if (!user) {
+            // Not registered - show registration menu
+            if (text.toLowerCase() === 'daftar') {
+                return handleRegistration(msg, phone, text, null);
+            }
+            return smartReply(msg, `👋 Halo! Selamat datang di *${config.NAMA_BISNIS}*\n\nNomor kamu belum terdaftar.\n\n*Pilih cara daftar:*\n\n1️⃣ Daftar di *website*:\n🌐 ${config.WEBSITE}/daftar\n\n2️⃣ Daftar *di sini*:\nKetik *DAFTAR*`);
+        }
+
+        // Check if active
+        if (!db.isUserActive(user)) {
+            return smartReply(msg, `⏰ Masa aktif *${user.store_name}* sudah habis.\n\nUntuk perpanjang, hubungi admin:\n📱 wa.me/${config.NOMOR_ADMIN}\n\nAtau cek di:\n🌐 ${config.WEBSITE}/kasir`);
+        }
+
+        // Active user - process message
+        await handleWarungMessage(msg, phone, text, user);
+
+    } catch (err) {
+        console.error('[ERROR]', err);
+        smartReply(msg, '❌ Terjadi error. Coba lagi.').catch(() => {});
+    }
+});
+
+// ═══ START ═══
 client.initialize();
 
+// ═══ QR WEB SERVER ═══
 const http = require('http');
 http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     const qrText = fs.existsSync('qr.txt') ? fs.readFileSync('qr.txt', 'utf8') : '';
-    res.end(`
-        <html>
-        <head>
-          <meta http-equiv="refresh" content="5">
-          <title>QR Scanner</title>
-        </head>
-        <body style="font-family: Arial; text-align: center; margin-top: 50px;">
-          <h2>Scan QR Code Bot Kasir</h2>
-          <div id="qrcode" style="display:inline-block; margin-top:20px;"></div>
-          <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-          <script>
-            if("${qrText}") { new QRCode(document.getElementById("qrcode"), "${qrText}"); } 
-            else { document.getElementById("qrcode").innerHTML = "Menunggu QR..."; }
-          </script>
-          <p style="margin-top:20px; color:#666;">Otomatis refresh</p>
-        </body>
-        </html>
-    `);
+    res.end(`<html><head><meta http-equiv="refresh" content="5"><title>${config.NAMA_BISNIS} - QR</title></head>
+<body style="font-family:Arial;text-align:center;margin-top:50px;background:#0a0a0f;color:#f5f5f7">
+<h2>Scan QR Code ${config.NAMA_BISNIS}</h2>
+<div id="qr" style="display:inline-block;margin-top:20px"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>if("${qrText}"){new QRCode(document.getElementById("qr"),{text:"${qrText}",width:256,height:256})}else{document.getElementById("qr").innerHTML="<p>Menunggu QR...</p>"}</script>
+<p style="margin-top:20px;color:#666">Auto-refresh 5 detik</p></body></html>`);
 }).listen(config.PORT_WEB_QR);
 
-console.log('====================================================');
-console.log(' BUKA GOOGLE CHROME DI VM ANDA DAN KETIK ALAMAT:');
-console.log(`                 http://localhost:${config.PORT_WEB_QR}`);
-console.log('====================================================');
+console.log('════════════════════════════════════════════');
+console.log(` ${config.NAMA_BISNIS} — Bot Kasir WA Multi-Tenant`);
+console.log(` QR Scanner: http://localhost:${config.PORT_WEB_QR}`);
+console.log('════════════════════════════════════════════');

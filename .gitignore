@@ -1,9 +1,8 @@
 node_modules/
 .wwebjs_auth/
 .wwebjs_cache/
+.serena/
 struk/
-keuangan.json
-laporan_database.txt
 qr.txt
-config_backup.js
+config.js
 *.log
