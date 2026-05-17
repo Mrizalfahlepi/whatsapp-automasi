@@ -18,17 +18,25 @@ if (genAI) {
             responseSchema: {
                 type: SchemaType.OBJECT,
                 properties: {
-                    insertTransaksi: { type: SchemaType.ARRAY, items: { type: SchemaType.OBJECT, properties: {
-                        tipe: { type: SchemaType.STRING, description: "'masuk' atau 'keluar'" },
-                        jumlah: { type: SchemaType.NUMBER },
-                        ket: { type: SchemaType.STRING }
-                    }, required: ['tipe', 'jumlah', 'ket'] }},
-                    updateStok: { type: SchemaType.ARRAY, items: { type: SchemaType.OBJECT, properties: {
-                        aksi: { type: SchemaType.STRING, description: "'tambah' atau 'kurang'" },
-                        nama_barang: { type: SchemaType.STRING },
-                        qty: { type: SchemaType.NUMBER },
-                        satuan: { type: SchemaType.STRING }
-                    }, required: ['aksi', 'nama_barang', 'qty', 'satuan'] }},
+                    insertTransaksi: {
+                        type: SchemaType.ARRAY, items: {
+                            type: SchemaType.OBJECT, properties: {
+                                tipe: { type: SchemaType.STRING, description: "'masuk' atau 'keluar'" },
+                                jumlah: { type: SchemaType.NUMBER },
+                                ket: { type: SchemaType.STRING }
+                            }, required: ['tipe', 'jumlah', 'ket']
+                        }
+                    },
+                    updateStok: {
+                        type: SchemaType.ARRAY, items: {
+                            type: SchemaType.OBJECT, properties: {
+                                aksi: { type: SchemaType.STRING, description: "'tambah' atau 'kurang'" },
+                                nama_barang: { type: SchemaType.STRING },
+                                qty: { type: SchemaType.NUMBER },
+                                satuan: { type: SchemaType.STRING }
+                            }, required: ['aksi', 'nama_barang', 'qty', 'satuan']
+                        }
+                    },
                     aksiReset: { type: SchemaType.STRING, description: "HANYA 'RESET_HARIAN' atau 'RESET_TOTAL' jika user tegas YAKIN HAPUS. Kosongkan jika belum konfirmasi." },
                     reply: { type: SchemaType.STRING, description: "Balasan teks ke user. Gunakan bahasa kasir santuy, tabel rapi jika diminta rekap." }
                 },
@@ -361,7 +369,13 @@ client.on('message', async msg => {
     if (botSentMessages.has(msg.body.trim())) return;
     if (msg.from.endsWith('@g.us')) return; // Ignore groups
 
-    const phone = msg.from.replace('@c.us', '').replace('@lid', '');
+    let phone = msg.from.replace('@c.us', '').replace('@lid', '');
+    try {
+        const contact = await msg.getContact();
+        if (contact && contact.number) {
+            phone = contact.number;
+        }
+    } catch (e) {}
     const text = msg.body.trim();
     console.log(`[MSG] ${phone}: ${text}`);
 
@@ -394,7 +408,7 @@ client.on('message', async msg => {
 
     } catch (err) {
         console.error('[ERROR]', err);
-        smartReply(msg, '❌ Terjadi error. Coba lagi.').catch(() => {});
+        smartReply(msg, '❌ Terjadi error. Coba lagi.').catch(() => { });
     }
 });
 
