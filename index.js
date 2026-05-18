@@ -147,14 +147,29 @@ async function handleAdminCommand(msg, text) {
     const parts = text.split(/\s+/);
     const cmd = parts[0].toLowerCase();
 
+    if (cmd === '#menu' || cmd === '#help') {
+        return smartReply(msg, `👑 *ADMIN PANEL*\n━━━━━━━━━━━━━━━━━━━━\n\n📋 *Pelanggan*\n• #list — Daftar semua\n• #info [nomor] — Detail\n• #stats — Statistik\n\n⚡ *Kelola*\n• #aktifkan [nomor] [hari]\n• #trial [nomor]\n• #ban [nomor]\n• #hapus [nomor]\n\n📢 *Komunikasi*\n• #broadcast [pesan]\n\n⏰ *Auto-Reminder*\nOtomatis H-1 sebelum expired`);
+    }
+
+    if (cmd === '#stats') {
+        const users = await db.getAllUsers();
+        const active = users.filter(u => db.isUserActive(u)).length;
+        const trial = users.filter(u => u.status === 'trial').length;
+        const paid = users.filter(u => u.status === 'active').length;
+        const expired = users.filter(u => !db.isUserActive(u) && u.status !== 'banned').length;
+        const banned = users.filter(u => u.status === 'banned').length;
+        return smartReply(msg, `📊 *STATISTIK ${config.NAMA_BISNIS}*\n━━━━━━━━━━━━━━━━━━━━\n\n👥 Total Pelanggan: *${users.length}*\n🟢 Aktif: *${active}*\n⏳ Trial: *${trial}*\n💳 Berbayar: *${paid}*\n🔴 Expired: *${expired}*\n⛔ Banned: *${banned}*`);
+    }
+
     if (cmd === '#list') {
         const users = await db.getAllUsers();
-        if (users.length === 0) return smartReply(msg, '📋 Belum ada warung terdaftar.');
-        let reply = `📋 *DAFTAR WARUNG* (${users.length})\n━━━━━━━━━━━━━━━━━━━━━\n`;
+        if (users.length === 0) return smartReply(msg, '📋 Belum ada pelanggan terdaftar.');
+        let reply = `📋 *DAFTAR PELANGGAN* (${users.length})\n━━━━━━━━━━━━━━━━━━━━━\n`;
         for (const u of users) {
             const active = db.isUserActive(u);
             const icon = active ? '🟢' : (u.status === 'banned' ? '⛔' : '🔴');
-            reply += `${icon} *${u.store_name}*\n   ${u.phone} | ${u.owner_name}\n   Status: ${u.status} | ${active ? 'Aktif' : 'Expired'}\n\n`;
+            const endDate = u.paid_until ? moment(u.paid_until).format('DD/MM') : (u.trial_end ? moment(u.trial_end).format('DD/MM') : '-');
+            reply += `${icon} *${u.store_name}*\n   📱 ${u.phone} | ${u.status} | s/d ${endDate}\n`;
         }
         return smartReply(msg, reply);
     }
@@ -162,23 +177,24 @@ async function handleAdminCommand(msg, text) {
     if (cmd === '#info' && parts[1]) {
         const phone = normalizePhone(parts[1]);
         const user = await db.getUser(phone);
-        if (!user) return smartReply(msg, `❌ Warung ${phone} tidak ditemukan.`);
+        if (!user) return smartReply(msg, `❌ Pelanggan ${phone} tidak ditemukan.`);
         const saldo = await db.getSaldo(phone);
         const trx = await db.getTransactions(phone);
         const stok = await db.getStock(phone);
-        let reply = `📊 *INFO WARUNG*\n━━━━━━━━━━━━━━━━━━━━━\n`;
-        reply += `🏪 *${user.store_name}*\n👤 ${user.owner_name}\n📱 ${user.phone}\n`;
+        const staffList = await db.getStaffList(phone);
+        let reply = `📊 *INFO PELANGGAN*\n━━━━━━━━━━━━━━━━━━━━━\n`;
+        reply += `🏪 *${user.store_name}*\n👤 ${user.owner_name}\n📱 ${user.phone}\n🎭 ${user.persona || 'warung'}\n`;
         reply += `📌 Status: ${user.status}\n`;
         reply += `⏰ Trial: ${user.trial_end ? moment(user.trial_end).format('DD MMM YYYY') : '-'}\n`;
         reply += `💳 Bayar s/d: ${user.paid_until ? moment(user.paid_until).format('DD MMM YYYY') : '-'}\n`;
-        reply += `💰 Saldo: Rp${formatRupiah(saldo)}\n📝 Transaksi: ${trx.length}\n📦 Item stok: ${stok.length}`;
+        reply += `💰 Saldo: Rp${formatRupiah(saldo)}\n📝 Transaksi: ${trx.length}\n📦 Stok: ${stok.length}\n👥 Staff: ${staffList.length}`;
         return smartReply(msg, reply);
     }
 
     if (cmd === '#aktifkan' && parts[1]) {
         const phone = normalizePhone(parts[1]);
         const user = await db.getUser(phone);
-        if (!user) return smartReply(msg, `❌ Warung ${phone} tidak ditemukan.`);
+        if (!user) return smartReply(msg, `❌ Pelanggan ${phone} tidak ditemukan.`);
         const days = parseInt(parts[2]) || 30;
         const paidUntil = moment().tz(TZ).add(days, 'days').toISOString();
         await db.updateUserStatus(phone, 'active', paidUntil);
@@ -188,7 +204,7 @@ async function handleAdminCommand(msg, text) {
     if (cmd === '#trial' && parts[1]) {
         const phone = normalizePhone(parts[1]);
         const user = await db.getUser(phone);
-        if (!user) return smartReply(msg, `❌ Warung ${phone} tidak ditemukan.`);
+        if (!user) return smartReply(msg, `❌ Pelanggan ${phone} tidak ditemukan.`);
         const trialEnd = moment().tz(TZ).add(config.TRIAL_HARI || 7, 'days').toISOString();
         await db.supabase.from('users').update({ status: 'trial', trial_end: trialEnd, updated_at: new Date().toISOString() }).eq('phone', phone);
         return smartReply(msg, `✅ Trial *${user.store_name}* (${phone}) direset ${config.TRIAL_HARI || 7} hari.`);
@@ -197,7 +213,7 @@ async function handleAdminCommand(msg, text) {
     if (cmd === '#ban' && parts[1]) {
         const phone = normalizePhone(parts[1]);
         const user = await db.getUser(phone);
-        if (!user) return smartReply(msg, `❌ Warung ${phone} tidak ditemukan.`);
+        if (!user) return smartReply(msg, `❌ Pelanggan ${phone} tidak ditemukan.`);
         await db.updateUserStatus(phone, 'banned');
         return smartReply(msg, `⛔ *${user.store_name}* (${phone}) diblokir.`);
     }
@@ -205,9 +221,25 @@ async function handleAdminCommand(msg, text) {
     if (cmd === '#hapus' && parts[1]) {
         const phone = normalizePhone(parts[1]);
         const user = await db.getUser(phone);
-        if (!user) return smartReply(msg, `❌ Warung ${phone} tidak ditemukan.`);
+        if (!user) return smartReply(msg, `❌ Pelanggan ${phone} tidak ditemukan.`);
         await db.deleteUser(phone);
-        return smartReply(msg, `🗑️ *${user.store_name}* (${phone}) dihapus total (user + transaksi + stok).`);
+        return smartReply(msg, `🗑️ *${user.store_name}* (${phone}) dihapus total.`);
+    }
+
+    if (cmd === '#broadcast') {
+        const pesan = parts.slice(1).join(' ');
+        if (!pesan) return smartReply(msg, '❌ Format: *#broadcast [pesan]*');
+        const users = await db.getAllUsers();
+        const activeUsers = users.filter(u => db.isUserActive(u));
+        let sent = 0;
+        for (const u of activeUsers) {
+            try {
+                await client.sendMessage(u.phone + '@c.us', `📢 *${config.NAMA_BISNIS}*\n━━━━━━━━━━━━━━━━\n${pesan}`);
+                sent++;
+                await new Promise(r => setTimeout(r, 1000));
+            } catch (e) { console.error(`[BROADCAST ERROR] ${u.phone}:`, e.message); }
+        }
+        return smartReply(msg, `✅ Broadcast terkirim ke ${sent}/${activeUsers.length} pelanggan aktif.`);
     }
 
     return false;
@@ -704,3 +736,40 @@ console.log('══════════════════════�
 console.log(` ${config.NAMA_BISNIS} — Bot Kasir WA Multi-Tenant`);
 console.log(` QR Scanner: http://localhost:${config.PORT_WEB_QR}`);
 console.log('════════════════════════════════════════════');
+
+// ═══ AUTO-REMINDER: H-1 Trial/Subscription Expiry ═══
+const DEVELOPER_WA = '6282159895420';
+
+async function checkExpiryReminders() {
+    try {
+        const users = await db.getAllUsers();
+        const tomorrow = moment().tz(TZ).add(1, 'day').startOf('day');
+        const tomorrowEnd = moment().tz(TZ).add(1, 'day').endOf('day');
+
+        for (const u of users) {
+            if (u.status === 'banned') continue;
+            const expiry = u.paid_until ? moment(u.paid_until) : (u.trial_end ? moment(u.trial_end) : null);
+            if (!expiry) continue;
+
+            // Check if expiry is tomorrow (H-1)
+            if (expiry.isBetween(tomorrow, tomorrowEnd, null, '[]')) {
+                const isTrial = u.status === 'trial';
+                const msg = isTrial
+                    ? `⏰ *Reminder ${config.NAMA_BISNIS}*\n━━━━━━━━━━━━━━━━━━━\n\nHalo *${u.owner_name}*! 👋\n\nMasa trial *${u.store_name}* akan habis *besok*.\n\nJika ingin lanjut berlangganan:\n📱 Hubungi developer:\nwa.me/${DEVELOPER_WA}\n\nTerima kasih sudah menggunakan ${config.NAMA_BISNIS}! 🙏`
+                    : `⏰ *Reminder ${config.NAMA_BISNIS}*\n━━━━━━━━━━━━━━━━━━━\n\nHalo *${u.owner_name}*! 👋\n\nMasa langganan *${u.store_name}* akan habis *besok*.\n\nPerpanjang sekarang:\n📱 Hubungi developer:\nwa.me/${DEVELOPER_WA}\n\nTerima kasih! 🙏`;
+
+                try {
+                    await client.sendMessage(u.phone + '@c.us', msg);
+                    console.log(`[REMINDER] Sent to ${u.phone} (${u.store_name})`);
+                    await new Promise(r => setTimeout(r, 2000));
+                } catch (e) { console.error(`[REMINDER ERROR] ${u.phone}:`, e.message); }
+            }
+        }
+    } catch (e) { console.error('[REMINDER CHECK ERROR]', e.message); }
+}
+
+// Run reminder check every 6 hours
+setInterval(checkExpiryReminders, 6 * 60 * 60 * 1000);
+// Also run once 30s after startup
+setTimeout(checkExpiryReminders, 30000);
+console.log('⏰ Auto-reminder aktif (cek setiap 6 jam)');
