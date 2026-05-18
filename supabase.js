@@ -160,11 +160,52 @@ async function deleteReminder(id) {
     await supabase.from('user_reminders').delete().eq('id', id);
 }
 
+// ═══ STORE STAFF ═══
+async function getStaffByPhone(staffPhone) {
+    const { data } = await supabase.from('store_staff')
+        .select('*').eq('staff_phone', staffPhone).single();
+    return data;
+}
+
+async function getStaffList(ownerPhone) {
+    const { data } = await supabase.from('store_staff')
+        .select('*').eq('owner_phone', ownerPhone)
+        .order('created_at', { ascending: false });
+    return data || [];
+}
+
+async function addStaff(ownerPhone, staffPhone, staffName) {
+    const { data, error } = await supabase.from('store_staff')
+        .insert({ owner_phone: ownerPhone, staff_phone: staffPhone, staff_name: staffName })
+        .select().single();
+    if (error) throw error;
+    return data;
+}
+
+async function removeStaff(ownerPhone, staffPhone) {
+    await supabase.from('store_staff')
+        .delete().eq('owner_phone', ownerPhone).eq('staff_phone', staffPhone);
+}
+
+async function removeStaffByPhone(staffPhone) {
+    await supabase.from('store_staff').delete().eq('staff_phone', staffPhone);
+}
+
+async function getStaffTransactions(ownerPhone, staffName) {
+    // Get transactions with keterangan containing staff name tag
+    const { data } = await supabase.from('transactions')
+        .select('*').eq('user_phone', ownerPhone)
+        .ilike('ket', `%[${staffName}]%`)
+        .order('created_at', { ascending: false }).limit(30);
+    return data || [];
+}
+
 module.exports = {
     supabase, getUser, registerUser, getAllUsers, updateUserStatus, updateUserPersona, deleteUser, isUserActive,
     getTransactions, insertTransaction, getSaldo, deleteTransactions,
     getStock, upsertStock, deleteStock,
     getSession, setSession, deleteSession,
     getChatHistory, addChatHistory,
-    getReminders, addReminder, deleteReminder
+    getReminders, addReminder, deleteReminder,
+    getStaffByPhone, getStaffList, addStaff, removeStaff, removeStaffByPhone, getStaffTransactions
 };

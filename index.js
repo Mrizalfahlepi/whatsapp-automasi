@@ -129,9 +129,17 @@ const PERSONA_LIST = {
 const PERSONA_MENU = `Pilih *jenis catatan* kamu:\n\n1️⃣ Warung / Toko Kelontong\n2️⃣ Laundry\n3️⃣ Toko Bangunan\n4️⃣ Catatan Pribadi / Belanja\n5️⃣ Catering / Makanan\n6️⃣ Lainnya\n\nBalas dengan *angka* (1-6):`;
 const PERSONA_MAP = { '1': 'warung', '2': 'laundry', '3': 'toko_bangunan', '4': 'pribadi', '5': 'catering', '6': 'umum' };
 
-function getHelpMenu(persona) {
+function getHelpMenu(persona, role) {
     const p = PERSONA_LIST[persona] || PERSONA_LIST.umum;
-    return `📋 *PANDUAN ${config.NAMA_BISNIS}*\n━━━━━━━━━━━━━━━━━━━\n\n💰 *Catat Pemasukan*\n_Contoh: jual rokok 50rb_\n\n💸 *Catat Pengeluaran*\n_Contoh: kulak telur 100rb 10kg_\n\n📦 *Tambah/Kurangi Stok*\n_Contoh: tambah stok rokok 100 pcs_\n\n📊 *Laporan*\n• _laporan hari ini_\n• _laporan minggu ini_\n• _laba rugi_\n• _rekap stok_\n\n📷 *Kirim Struk/Foto*\nFoto struk → kirim ke sini\nBot otomatis baca & catat!\n\n🔔 *Pengingat Otomatis*\n_Contoh: ingatkan jika stok rokok di bawah 10_\n\n🔄 *Reset Data*\n_Ketik: reset data_\n\n🎭 *Ubah Jenis Bot*\n_Ketik: ubah persona_\n\n❓ *Bantuan*\n_Ketik: menu_\n\n_Jenis bot: ${p.label}_`;
+    let menu = `📋 *PANDUAN ${config.NAMA_BISNIS}*\n━━━━━━━━━━━━━━━━━━━\n\n💰 *Catat Pemasukan*\n_Contoh: jual rokok 50rb_\n\n💸 *Catat Pengeluaran*\n_Contoh: kulak telur 100rb 10kg_\n\n📦 *Tambah/Kurangi Stok*\n_Contoh: tambah stok rokok 100 pcs_\n\n📊 *Laporan*\n• _laporan hari ini_\n• _laporan minggu ini_\n• _laba rugi_\n• _rekap stok_\n\n📷 *Kirim Struk/Foto*\nFoto struk → kirim ke sini\n\n🔔 *Pengingat Otomatis*\n_Contoh: ingatkan jika stok rokok di bawah 10_\n\n❓ *Bantuan*\n_Ketik: menu_\n\n_Jenis: ${p.label}${role === 'staff' ? ' (Staff)' : ''}_`;
+    if (role === 'staff') {
+        menu += `\n\n🚪 *Keluar dari toko*\n_Ketik: keluar toko_`;
+    }
+    return menu;
+}
+
+function getOwnerMenu() {
+    return `👑 *MENU OWNER*\n━━━━━━━━━━━━━━━━━━━\n\n👥 *Kelola Karyawan*\n• _tambah karyawan 08xxx Nama_\n• _hapus karyawan 08xxx_\n• _list karyawan_\n\n📊 *Laporan per Staff*\n• _laporan staff Budi_\n• _laporan staff semua_\n\n🔄 *Reset Data*\n_Ketik: reset data_\n\n🎭 *Ubah Jenis Bot*\n_Ketik: ubah persona_\n\n📋 *Menu Umum*\n_Ketik: menu_`;
 }
 
 // ═══ ADMIN COMMANDS HANDLER ═══
@@ -419,7 +427,7 @@ Jika user minta tambah/hapus pengingat, gunakan manageReminders.
 [20 Transaksi Terakhir]: ${JSON.stringify(recentTrx.slice(0, 20))}
 ${chatHistoryLines.length > 0 ? `[Riwayat Chat]:\n${chatHistoryLines.join('\n')}` : ''}
 
-Chat dari ${user.owner_name}: "${text || '[Mengirim Gambar/Struk]'}"`;
+Chat dari ${user._staffName || user.owner_name} (${user._role === 'staff' ? 'Staff' : 'Owner'}): "${text || '[Mengirim Gambar/Struk]'}"`;
 
         const requestContent = geminiImage ? [prompt, geminiImage] : prompt;
         const result = await geminiModel.generateContent(requestContent);
@@ -435,8 +443,9 @@ Chat dari ${user.owner_name}: "${text || '[Mengirim Gambar/Struk]'}"`;
 
         // Process transactions
         if (res.insertTransaksi && res.insertTransaksi.length > 0) {
+            const staffTag = user._staffName ? ` [${user._staffName}]` : '';
             for (const trx of res.insertTransaksi) {
-                await db.insertTransaction(phone, trx.tipe === 'masuk' ? 'masuk' : 'keluar', Number(trx.jumlah) || 0, trx.ket || '');
+                await db.insertTransaction(phone, trx.tipe === 'masuk' ? 'masuk' : 'keluar', Number(trx.jumlah) || 0, (trx.ket || '') + staffTag);
             }
         }
 
@@ -520,20 +529,19 @@ client.on('message_create', async msg => {
 client.on('message', async msg => {
     if ((!msg.body && !msg.hasMedia) || msg.fromMe) return;
     if (msg.body && botSentMessages.has(msg.body.trim())) return;
-    if (msg.from.endsWith('@g.us')) return; // Ignore groups
+    if (msg.from.endsWith('@g.us')) return;
 
     let phone = msg.from.replace('@c.us', '').replace('@lid', '');
     try {
         const contact = await msg.getContact();
-        if (contact && contact.number) {
-            phone = contact.number;
-        }
+        if (contact && contact.number) { phone = contact.number; }
     } catch (e) {}
     const text = (msg.body || '').trim();
+    const lowerText = text.toLowerCase();
     console.log(`[MSG] ${phone}: ${text || '[MEDIA]'}`);
 
     try {
-        // Check session for registration & persona change flows
+        // Check session flows (registration, persona change)
         const session = await db.getSession(phone);
         if (session && session.state) {
             const s = session.state;
@@ -543,37 +551,131 @@ client.on('message', async msg => {
             }
         }
 
-        // Check user registration
+        // ═══ CHECK: Is this a registered OWNER? ═══
         const user = await db.getUser(phone);
 
-        if (!user) {
-            if (text.toLowerCase() === 'daftar') {
-                return handleRegistration(msg, phone, text, null);
+        if (user) {
+            if (!db.isUserActive(user)) {
+                return smartReply(msg, `⏰ Masa aktif *${user.store_name}* sudah habis.\n\nHubungi admin: wa.me/${config.NOMOR_ADMIN}`);
             }
-            return smartReply(msg, `👋 Halo! Selamat datang di *${config.NAMA_BISNIS}*\n\nNomor kamu belum terdaftar.\n\n*Pilih cara daftar:*\n\n1️⃣ Daftar di *website*:\n🌐 ${config.WEBSITE}/daftar\n\n2️⃣ Daftar *di sini*:\nKetik *DAFTAR*`);
+
+            // Menu umum
+            if (['menu', 'bantuan', 'help', '?'].includes(lowerText)) {
+                return smartReply(msg, getHelpMenu(user.persona || 'umum'));
+            }
+            // Menu owner
+            if (lowerText === 'menu owner' || lowerText === 'owner menu') {
+                return smartReply(msg, getOwnerMenu());
+            }
+            // Ubah persona
+            if (lowerText.includes('ubah persona') || lowerText.includes('ganti persona')) {
+                await db.setSession(phone, 'change_persona');
+                return smartReply(msg, `🎭 *Ubah Jenis Bot*\n\n${PERSONA_MENU}`);
+            }
+
+            // --- STAFF MANAGEMENT (OWNER ONLY) ---
+            if (lowerText.startsWith('tambah karyawan')) {
+                const parts = text.split(/\s+/);
+                const staffPhone = normalizePhone(parts[2] || '');
+                const staffName = parts.slice(3).join(' ') || 'Staff';
+                if (!staffPhone || staffPhone.length < 10) {
+                    return smartReply(msg, '❌ Format: *tambah karyawan [nomor] [nama]*\n_Contoh: tambah karyawan 08123456789 Budi_');
+                }
+                if (user.status === 'trial') {
+                    const existing = await db.getStaffList(phone);
+                    if (existing.length >= 2) {
+                        return smartReply(msg, `❌ Akun *Trial* maks 2 karyawan.\n\nUntuk unlimited, hubungi admin:\n📱 wa.me/${config.NOMOR_ADMIN}`);
+                    }
+                }
+                const existingUser = await db.getUser(staffPhone);
+                if (existingUser) return smartReply(msg, `❌ Nomor ${staffPhone} sudah terdaftar sebagai pemilik toko lain.`);
+                try {
+                    await db.addStaff(phone, staffPhone, staffName);
+                    return smartReply(msg, `✅ *${staffName}* (${staffPhone}) ditambahkan sebagai staff!\n\nMereka tinggal chat bot ini.`);
+                } catch (err) {
+                    if (err.code === '23505') return smartReply(msg, '❌ Nomor sudah terdaftar sebagai staff di toko lain.');
+                    return smartReply(msg, '❌ Gagal menambahkan. Coba lagi.');
+                }
+            }
+            if (lowerText.startsWith('hapus karyawan')) {
+                const staffPhone = normalizePhone(text.split(/\s+/)[2] || '');
+                if (!staffPhone) return smartReply(msg, '❌ Format: *hapus karyawan [nomor]*');
+                await db.removeStaff(phone, staffPhone);
+                return smartReply(msg, `✅ Staff ${staffPhone} dihapus.`);
+            }
+            if (lowerText === 'list karyawan' || lowerText === 'daftar karyawan') {
+                const staffList = await db.getStaffList(phone);
+                if (staffList.length === 0) return smartReply(msg, '📋 Belum ada karyawan.\n\n_Tambah: tambah karyawan 08xxx Nama_');
+                let reply = `👥 *STAFF ${user.store_name}*\n━━━━━━━━━━━━━━━━\n`;
+                staffList.forEach((s, i) => { reply += `${i + 1}. 👤 *${s.staff_name}*\n   📱 ${s.staff_phone}\n`; });
+                const limit = user.status === 'trial' ? ' (maks 2 - Trial)' : ' (unlimited)';
+                reply += `\n_Total: ${staffList.length}${limit}_`;
+                return smartReply(msg, reply);
+            }
+            if (lowerText.startsWith('laporan staff')) {
+                const staffName = text.split(/\s+/).slice(2).join(' ').trim();
+                if (!staffName || staffName.toLowerCase() === 'semua') {
+                    const staffList = await db.getStaffList(phone);
+                    if (staffList.length === 0) return smartReply(msg, '📋 Belum ada karyawan.');
+                    let reply = `📊 *LAPORAN SEMUA STAFF*\n━━━━━━━━━━━━━━━━\n`;
+                    for (const s of staffList) {
+                        const trxs = await db.getStaffTransactions(phone, s.staff_name);
+                        const masuk = trxs.filter(t => t.tipe === 'masuk').reduce((a, t) => a + t.jumlah, 0);
+                        const keluar = trxs.filter(t => t.tipe === 'keluar').reduce((a, t) => a + t.jumlah, 0);
+                        reply += `\n👤 *${s.staff_name}*\n   📝 ${trxs.length} transaksi\n   💰 Masuk: Rp${formatRupiah(masuk)}\n   💸 Keluar: Rp${formatRupiah(keluar)}\n`;
+                    }
+                    return smartReply(msg, reply);
+                } else {
+                    const trxs = await db.getStaffTransactions(phone, staffName);
+                    if (trxs.length === 0) return smartReply(msg, `📋 Belum ada transaksi dari *${staffName}*.`);
+                    let reply = `📊 *STAFF: ${staffName}*\n━━━━━━━━━━━━━━━━\n`;
+                    let totalM = 0, totalK = 0;
+                    trxs.slice(0, 15).forEach(t => {
+                        const icon = t.tipe === 'masuk' ? '💰' : '💸';
+                        if (t.tipe === 'masuk') totalM += t.jumlah; else totalK += t.jumlah;
+                        reply += `${icon} Rp${formatRupiah(t.jumlah)} ${t.ket}\n`;
+                    });
+                    reply += `─────────────────\n💰 Masuk: Rp${formatRupiah(totalM)}\n💸 Keluar: Rp${formatRupiah(totalK)}\n📈 Net: Rp${formatRupiah(totalM - totalK)}`;
+                    return smartReply(msg, reply);
+                }
+            }
+
+            // Owner - normal message
+            await handleWarungMessage(msg, phone, text, user);
+            return;
         }
 
-        // Check if active
-        if (!db.isUserActive(user)) {
-            return smartReply(msg, `⏰ Masa aktif *${user.store_name}* sudah habis.\n\nUntuk perpanjang, hubungi admin:\n📱 wa.me/${config.NOMOR_ADMIN}\n\nAtau cek di:\n🌐 ${config.WEBSITE}/kasir`);
+        // ═══ CHECK: Is this a STAFF member? ═══
+        const staffInfo = await db.getStaffByPhone(phone);
+        if (staffInfo) {
+            const owner = await db.getUser(staffInfo.owner_phone);
+            if (!owner) return smartReply(msg, '❌ Toko tidak ditemukan. Hubungi pemilik.');
+            if (!db.isUserActive(owner)) return smartReply(msg, `⏰ Toko *${owner.store_name}* sudah habis masa aktifnya.\nHubungi pemilik.`);
+
+            if (['menu', 'bantuan', 'help', '?'].includes(lowerText)) {
+                return smartReply(msg, getHelpMenu(owner.persona || 'umum', 'staff'));
+            }
+            // Block restricted commands
+            if (lowerText.includes('reset') || lowerText.includes('ubah persona') || lowerText.includes('ganti persona') ||
+                lowerText.startsWith('tambah karyawan') || lowerText.startsWith('hapus karyawan') ||
+                lowerText.includes('list karyawan') || lowerText.includes('daftar karyawan') ||
+                lowerText === 'menu owner' || lowerText === 'owner menu') {
+                return smartReply(msg, '🔒 Maaf, fitur ini hanya untuk pemilik toko.');
+            }
+            if (lowerText === 'keluar toko') {
+                await db.removeStaffByPhone(phone);
+                return smartReply(msg, `👋 Kamu sudah keluar dari *${owner.store_name}*.\n\nKetik *DAFTAR* jika ingin buat toko sendiri.`);
+            }
+
+            // Staff → route to owner's store data
+            const staffUser = { ...owner, _role: 'staff', _staffName: staffInfo.staff_name };
+            await handleWarungMessage(msg, staffInfo.owner_phone, text, staffUser);
+            return;
         }
 
-        // Handle special commands
-        const lowerText = text.toLowerCase();
-
-        // Menu / Bantuan
-        if (['menu', 'bantuan', 'help', '?'].includes(lowerText)) {
-            return smartReply(msg, getHelpMenu(user.persona || 'umum'));
-        }
-
-        // Ubah persona
-        if (lowerText.includes('ubah persona') || lowerText.includes('ganti persona')) {
-            await db.setSession(phone, 'change_persona');
-            return smartReply(msg, `🎭 *Ubah Jenis Bot*\n\n${PERSONA_MENU}`);
-        }
-
-        // Active user - process message
-        await handleWarungMessage(msg, phone, text, user);
+        // ═══ NOT REGISTERED ═══
+        if (lowerText === 'daftar') return handleRegistration(msg, phone, text, null);
+        return smartReply(msg, `👋 Halo! Selamat datang di *${config.NAMA_BISNIS}*\n\nNomor kamu belum terdaftar.\n\n1️⃣ Daftar di web: ${config.WEBSITE}/daftar\n2️⃣ Daftar di sini: Ketik *DAFTAR*`);
 
     } catch (err) {
         console.error('[ERROR]', err);
