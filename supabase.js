@@ -11,11 +11,11 @@ async function getUser(phone) {
     return data;
 }
 
-async function registerUser(phone, storeName, ownerName, pin) {
+async function registerUser(phone, storeName, ownerName, pin, persona) {
     const trialEnd = moment().tz(TZ).add(config.TRIAL_HARI || 7, 'days').toISOString();
     const { data, error } = await supabase.from('users').insert({
         phone, store_name: storeName, owner_name: ownerName, pin,
-        status: 'trial', trial_end: trialEnd
+        status: 'trial', trial_end: trialEnd, persona: persona || 'warung'
     }).select().single();
     if (error) throw error;
     return data;
@@ -32,10 +32,16 @@ async function updateUserStatus(phone, status, paidUntil) {
     await supabase.from('users').update(update).eq('phone', phone);
 }
 
+async function updateUserPersona(phone, persona) {
+    await supabase.from('users').update({ persona, updated_at: new Date().toISOString() }).eq('phone', phone);
+}
+
 async function deleteUser(phone) {
     await supabase.from('transactions').delete().eq('user_phone', phone);
     await supabase.from('stock').delete().eq('user_phone', phone);
     await supabase.from('bot_sessions').delete().eq('phone', phone);
+    await supabase.from('chat_history').delete().eq('phone', phone);
+    await supabase.from('user_reminders').delete().eq('phone', phone);
     await supabase.from('users').delete().eq('phone', phone);
 }
 
@@ -113,9 +119,52 @@ async function deleteSession(phone) {
     await supabase.from('bot_sessions').delete().eq('phone', phone);
 }
 
+// ═══ CHAT HISTORY (MEMORY) ═══
+async function getChatHistory(phone, limit = 10) {
+    const { data } = await supabase.from('chat_history')
+        .select('role, content')
+        .eq('phone', phone)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+    return (data || []).reverse();
+}
+
+async function addChatHistory(phone, role, content) {
+    const trimmed = (content || '').substring(0, 500); // Max 500 chars per message
+    await supabase.from('chat_history').insert({
+        phone, role, content: trimmed
+    });
+    // Auto-cleanup: keep max 20 per user
+    const { data } = await supabase.from('chat_history')
+        .select('id').eq('phone', phone)
+        .order('created_at', { ascending: false });
+    if (data && data.length > 20) {
+        const idsToDelete = data.slice(20).map(d => d.id);
+        await supabase.from('chat_history').delete().in('id', idsToDelete);
+    }
+}
+
+// ═══ USER REMINDERS ═══
+async function getReminders(phone) {
+    const { data } = await supabase.from('user_reminders')
+        .select('*').eq('phone', phone)
+        .order('created_at', { ascending: false });
+    return data || [];
+}
+
+async function addReminder(phone, reminder) {
+    await supabase.from('user_reminders').insert({ phone, reminder });
+}
+
+async function deleteReminder(id) {
+    await supabase.from('user_reminders').delete().eq('id', id);
+}
+
 module.exports = {
-    supabase, getUser, registerUser, getAllUsers, updateUserStatus, deleteUser, isUserActive,
+    supabase, getUser, registerUser, getAllUsers, updateUserStatus, updateUserPersona, deleteUser, isUserActive,
     getTransactions, insertTransaction, getSaldo, deleteTransactions,
     getStock, upsertStock, deleteStock,
-    getSession, setSession, deleteSession
+    getSession, setSession, deleteSession,
+    getChatHistory, addChatHistory,
+    getReminders, addReminder, deleteReminder
 };

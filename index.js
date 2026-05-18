@@ -13,7 +13,7 @@ if (genAI) {
     geminiModel = genAI.getGenerativeModel({
         model: 'gemini-2.5-flash',
         generationConfig: {
-            temperature: 0.2,
+            temperature: 0.35,
             responseMimeType: 'application/json',
             responseSchema: {
                 type: SchemaType.OBJECT,
@@ -32,13 +32,22 @@ if (genAI) {
                             type: SchemaType.OBJECT, properties: {
                                 aksi: { type: SchemaType.STRING, description: "'tambah' atau 'kurang'" },
                                 nama_barang: { type: SchemaType.STRING },
-                                qty: { type: SchemaType.NUMBER },
+                                qty: { type: SchemaType.NUMBER, description: "Angka desimal. Contoh: 0.5 untuk setengah" },
                                 satuan: { type: SchemaType.STRING }
                             }, required: ['aksi', 'nama_barang', 'qty', 'satuan']
                         }
                     },
+                    manageReminders: {
+                        type: SchemaType.ARRAY, items: {
+                            type: SchemaType.OBJECT, properties: {
+                                aksi: { type: SchemaType.STRING, description: "'tambah' atau 'hapus'" },
+                                teks: { type: SchemaType.STRING, description: "Isi pengingat" },
+                                id: { type: SchemaType.NUMBER, description: "ID reminder untuk dihapus" }
+                            }, required: ['aksi', 'teks']
+                        }
+                    },
                     aksiReset: { type: SchemaType.STRING, description: "HANYA 'RESET_HARIAN' atau 'RESET_TOTAL' jika user tegas YAKIN HAPUS. Kosongkan jika belum konfirmasi." },
-                    reply: { type: SchemaType.STRING, description: "Balasan teks ke user. Gunakan bahasa kasir santuy, tabel rapi jika diminta rekap." }
+                    reply: { type: SchemaType.STRING, description: "Balasan teks ke user. Santuy, rapih, pakai emoji. Format tabel mobile-friendly jika laporan." }
                 },
                 required: ['reply']
             }
@@ -106,6 +115,23 @@ function parseNominal(str) {
     if (s.includes('juta') || s.includes('jt') || s.includes('m')) return parseFloat(s.replace(/juta|jt|m/g, '').replace(/\./g, '').replace(/,/g, '.')) * 1000000;
     if (s.includes('ribu') || s.includes('rb') || s.includes('k')) return parseFloat(s.replace(/ribu|rb|k/g, '').replace(/\./g, '').replace(/,/g, '.')) * 1000;
     return Math.round(parseFloat(s.replace(/\./g, '').replace(/,/g, '.')));
+}
+
+// ═══ PERSONA CONFIG ═══
+const PERSONA_LIST = {
+    warung: { label: 'Warung / Toko', terms: 'jual, kulak, dagangan, stok, lapak' },
+    laundry: { label: 'Laundry', terms: 'cucian masuk, cucian selesai, setrika, ongkos cuci' },
+    toko_bangunan: { label: 'Toko Bangunan', terms: 'jual material, stok semen, orderan, proyek' },
+    pribadi: { label: 'Catatan Pribadi', terms: 'pengeluaran, pemasukan, tabungan, belanja, cicilan' },
+    catering: { label: 'Catering', terms: 'orderan, menu, bahan baku, porsi, pesanan' },
+    umum: { label: 'Catatan Umum', terms: 'masuk, keluar, catat, stok, laporan' }
+};
+const PERSONA_MENU = `Pilih *jenis catatan* kamu:\n\n1️⃣ Warung / Toko Kelontong\n2️⃣ Laundry\n3️⃣ Toko Bangunan\n4️⃣ Catatan Pribadi / Belanja\n5️⃣ Catering / Makanan\n6️⃣ Lainnya\n\nBalas dengan *angka* (1-6):`;
+const PERSONA_MAP = { '1': 'warung', '2': 'laundry', '3': 'toko_bangunan', '4': 'pribadi', '5': 'catering', '6': 'umum' };
+
+function getHelpMenu(persona) {
+    const p = PERSONA_LIST[persona] || PERSONA_LIST.umum;
+    return `📋 *PANDUAN ${config.NAMA_BISNIS}*\n━━━━━━━━━━━━━━━━━━━\n\n💰 *Catat Pemasukan*\n_Contoh: jual rokok 50rb_\n\n💸 *Catat Pengeluaran*\n_Contoh: kulak telur 100rb 10kg_\n\n📦 *Tambah/Kurangi Stok*\n_Contoh: tambah stok rokok 100 pcs_\n\n📊 *Laporan*\n• _laporan hari ini_\n• _laporan minggu ini_\n• _laba rugi_\n• _rekap stok_\n\n📷 *Kirim Struk/Foto*\nFoto struk → kirim ke sini\nBot otomatis baca & catat!\n\n🔔 *Pengingat Otomatis*\n_Contoh: ingatkan jika stok rokok di bawah 10_\n\n🔄 *Reset Data*\n_Ketik: reset data_\n\n🎭 *Ubah Jenis Bot*\n_Ketik: ubah persona_\n\n❓ *Bantuan*\n_Ketik: menu_\n\n_Jenis bot: ${p.label}_`;
 }
 
 // ═══ ADMIN COMMANDS HANDLER ═══
@@ -186,20 +212,20 @@ async function handleRegistration(msg, phone, text, session) {
     if (!state || state === 'idle' || state === 'active') {
         if (text.toLowerCase() === 'daftar') {
             await db.setSession(phone, 'reg_store');
-            return smartReply(msg, `📝 *Pendaftaran ${config.NAMA_BISNIS}*\n\nLangkah 1/3\nKirimkan *Nama Toko* kamu:\n\n_Contoh: Warung Berkah Bu Amin_`);
+            return smartReply(msg, `📝 *Pendaftaran ${config.NAMA_BISNIS}*\n\nLangkah 1/4\nKirimkan *Nama Toko/Usaha* kamu:\n\n_Contoh: Warung Berkah Bu Amin_\n_Contoh: Laundry Express_\n_Contoh: Catatan Belanja Saya_`);
         }
         return null;
     }
 
     if (state === 'reg_store') {
         await db.setSession(phone, 'reg_owner', { store_name: text.trim() });
-        return smartReply(msg, `✅ Nama toko: *${text.trim()}*\n\nLangkah 2/3\nSekarang kirim *Nama Pemilik*:\n\n_Contoh: Bu Amin_`);
+        return smartReply(msg, `✅ Nama: *${text.trim()}*\n\nLangkah 2/4\nSekarang kirim *Nama Pemilik*:\n\n_Contoh: Bu Amin_`);
     }
 
     if (state === 'reg_owner') {
         const prevData = session?.data || {};
         await db.setSession(phone, 'reg_pin', { ...prevData, owner_name: text.trim() });
-        return smartReply(msg, `✅ Nama pemilik: *${text.trim()}*\n\nLangkah 3/3\nBuat *PIN 6 digit* untuk login di website:\n\n_Contoh: 123456_`);
+        return smartReply(msg, `✅ Pemilik: *${text.trim()}*\n\nLangkah 3/4\nBuat *PIN 4-8 digit* untuk login di website:\n\n_Contoh: 123456_`);
     }
 
     if (state === 'reg_pin') {
@@ -207,17 +233,55 @@ async function handleRegistration(msg, phone, text, session) {
         if (pin.length < 4 || pin.length > 8) {
             return smartReply(msg, '❌ PIN harus 4-8 digit angka. Coba lagi:');
         }
+        const prevData = session?.data || {};
+        await db.setSession(phone, 'reg_persona', { ...prevData, pin });
+        return smartReply(msg, `✅ PIN disimpan!\n\nLangkah 4/4\n${PERSONA_MENU}`);
+    }
+
+    if (state === 'reg_persona') {
+        const persona = PERSONA_MAP[text.trim()];
+        if (!persona) {
+            return smartReply(msg, `❌ Pilih angka 1-6 saja ya!\n\n${PERSONA_MENU}`);
+        }
         const temp = session?.data || {};
         try {
-            await db.registerUser(phone, temp.store_name || 'Toko Baru', temp.owner_name || 'Owner', pin);
+            await db.registerUser(phone, temp.store_name || 'Toko Baru', temp.owner_name || 'Owner', temp.pin || '123456', persona);
             await db.setSession(phone, 'active', null);
             const trialEnd = moment().tz(TZ).add(config.TRIAL_HARI || 7, 'days').format('DD MMMM YYYY');
-            return smartReply(msg, `🎉 *Pendaftaran Berhasil!*\n━━━━━━━━━━━━━━━━━━━━━\n🏪 Toko: *${temp.store_name}*\n👤 Pemilik: *${temp.owner_name}*\n🔑 PIN: *${pin}*\n⏰ Trial GRATIS sampai: *${trialEnd}*\n\n📌 Kamu juga bisa login di:\n🌐 ${config.WEBSITE}/kasir\n\nMulai sekarang, langsung chat untuk catat penjualan!\n_Contoh: masuk 50k jual rokok_`);
+            const pLabel = PERSONA_LIST[persona]?.label || 'Umum';
+            await smartReply(msg, `🎉 *Pendaftaran Berhasil!*\n━━━━━━━━━━━━━━━━━━━━━\n🏪 Toko: *${temp.store_name}*\n👤 Pemilik: *${temp.owner_name}*\n🎭 Jenis: *${pLabel}*\n🔑 PIN: *${temp.pin}*\n⏰ Trial GRATIS sampai: *${trialEnd}*\n\n📌 Login web: ${config.WEBSITE}/kasir`);
+            return smartReply(msg, getHelpMenu(persona));
         } catch (err) {
             console.error('[REG ERROR]', err);
             if (err.code === '23505') return smartReply(msg, '❌ Nomor ini sudah terdaftar!');
             return smartReply(msg, '❌ Gagal mendaftar. Coba lagi nanti.');
         }
+    }
+
+    // Handle persona change flow
+    if (state === 'change_persona') {
+        const persona = PERSONA_MAP[text.trim()];
+        if (!persona) {
+            return smartReply(msg, `❌ Pilih angka 1-6 saja ya!\n\n${PERSONA_MENU}`);
+        }
+        await db.updateUserPersona(phone, persona);
+        await db.setSession(phone, 'change_persona_confirm', { new_persona: persona });
+        const pLabel = PERSONA_LIST[persona]?.label || 'Umum';
+        return smartReply(msg, `✅ Persona diubah ke *${pLabel}*!\n\nApakah data lama mau dihapus?\n\n1️⃣ *HAPUS* semua data (mulai bersih)\n2️⃣ *SIMPAN* data yang ada\n\nBalas *1* atau *2*:`);
+    }
+
+    if (state === 'change_persona_confirm') {
+        const choice = text.trim();
+        if (choice === '1') {
+            await db.deleteTransactions(phone);
+            await db.deleteStock(phone);
+            await db.setSession(phone, 'active', null);
+            return smartReply(msg, `🗑️ Data lama dihapus! Kamu mulai dari awal.\n\n${getHelpMenu(session?.data?.new_persona || 'umum')}`);
+        } else if (choice === '2') {
+            await db.setSession(phone, 'active', null);
+            return smartReply(msg, `👍 Data lama tetap tersimpan!\n\n${getHelpMenu(session?.data?.new_persona || 'umum')}`);
+        }
+        return smartReply(msg, '❌ Pilih *1* (Hapus) atau *2* (Simpan):');
     }
 
     return null;
@@ -276,22 +340,84 @@ async function handleWarungMessage(msg, phone, text, user) {
         const stokObj = {};
         stokData.forEach(s => { stokObj[`${s.nama_barang}__${s.satuan}`] = { nama: s.nama_barang, satuan: s.satuan, qty: s.qty }; });
 
-        const prompt = `Anda adalah "KasirBot", asisten kasir cerdas untuk "${user.store_name}". Owner bernama "${user.owner_name}". Anda santuy tapi AKURAT. Paham bahasa gaul, Sunda, Jawa, Madura, Melayu, dll.
-Sekarang: ${getTanggalLengkap()} ${getWaktu()}.
+        // Load chat memory
+        const history = await db.getChatHistory(phone, 10);
+        const chatHistoryLines = history.map(h => h.role === 'user' ? `[User]: ${h.content}` : `[Bot]: ${h.content}`);
 
---- ATURAN KETAT ---
-1. PENJUALAN: Jika user jual barang, masukkan "masuk" dan KURANGI stok.
-2. PEMBELIAN STOK: Jika user kulakan, "keluar" uang dan TAMBAH stok.
-3. JIKA TIDAK JELAS: Tanya balik di "reply", JANGAN entry data.
-4. LAPORAN: Buat TABEL ASCII rapi. Pisah hari ini vs total.
-5. STOK DISPLAY: Konversi ke penjelasan manusia.
-6. RESET: Jika user minta reset, KONFIRMASI dulu. Baru isi aksiReset jika user bilang "YA HAPUS DATA".
-7. GAMBAR/STRUK: Jika ada gambar, BACA rincian struk/catatan tersebut. WAJIB catat total uangnya ke 'insertTransaksi' DAN WAJIB catat SETIAP item/barang yang ada di foto ke dalam array 'updateStok' (aksi, nama_barang, qty, satuan). Sebutkan rincian barang yang berhasil dicatat pada teks 'reply' agar user tahu.
+        // Load reminders
+        const reminders = await db.getReminders(phone);
+        const remindersText = reminders.length > 0
+            ? reminders.map(r => `- [ID:${r.id}] ${r.reminder}`).join('\n')
+            : '(Belum ada pengingat)';
 
-Data Realtime:
+        // Persona config
+        const persona = user.persona || 'warung';
+        const pCfg = PERSONA_LIST[persona] || PERSONA_LIST.umum;
+
+        const prompt = `Anda adalah "${config.NAMA_BISNIS}", asisten pencatatan cerdas.
+Toko: "${user.store_name}" (${pCfg.label}) | Pemilik: "${user.owner_name}"
+Waktu: ${getTanggalLengkap()} ${getWaktu()}
+
+═══ KEPRIBADIAN ═══
+- Santuy, ramah, paham bahasa gaul/daerah (Sunda, Jawa, Madura, Melayu)
+- PROAKTIF: Beri info jika melihat pola penting (stok menipis, rugi, dll)
+- JANGAN halusinasi atau ngarang data. Jika ragu, TANYA BALIK
+- Sesuaikan istilah dengan jenis usaha: ${pCfg.terms}
+
+═══ ATURAN TRANSAKSI ═══
+1. JUAL/PEMASUKAN → tipe "masuk" + KURANGI stok otomatis
+2. KULAK/BELI → tipe "keluar" + TAMBAH stok otomatis
+3. Jika user sebut barang TANPA harga → TANYA harganya, JANGAN ngarang
+4. SELALU isi insertTransaksi DAN updateStok bersamaan jika ada barang
+
+═══ ATURAN STOK (SANGAT PENTING!) ═══
+- PECAHAN: "½ kg" = 0.5, "setengah" = 0.5, "1/4" = 0.25, "3/4" = 0.75
+- KONVERSI: stok "kg" tapi jual "gram" → konversi (500g = 0.5kg)
+- Qty di updateStok HARUS angka desimal yang benar
+- Jika stok tidak cukup → PERINGATKAN tapi tetap proses jika user yakin
+- SELALU sertakan updateStok saat ada penjualan/pembelian barang
+
+═══ FORMAT LAPORAN (WAJIB RAPIH!) ═══
+Gunakan format sederhana ini untuk WA:
+📊 *LAPORAN [JUDUL]*
+━━━━━━━━━━━━━━━━
+💰 Pemasukan
+• Rokok     Rp 50.000
+• Telur     Rp 25.000
+─────────────────
+  Total     Rp 75.000
+
+💸 Pengeluaran
+• Kulak     Rp 100.000
+─────────────────
+  Total     Rp 100.000
+
+📈 *Laba/Rugi: -Rp 25.000*
+💰 *Saldo: Rp xxx*
+
+- Maks 25 karakter per baris, jangan terlalu lebar
+- Pakai emoji untuk mempercantik
+- Pisahkan hari ini vs total jika diminta
+
+═══ RESET ═══
+- KONFIRMASI dulu: "Yakin hapus semua data?"
+- HANYA isi aksiReset jika user bilang YA/YAKIN
+
+═══ GAMBAR/STRUK ═══
+- Baca SEMUA item: nama, qty, harga
+- WAJIB catat ke insertTransaksi DAN updateStok per item
+- Tampilkan rincian di reply
+
+═══ PENGINGAT USER ═══
+${remindersText}
+Jika kondisi pengingat terpenuhi (cek data stok), SERTAKAN ⚠️ di reply.
+Jika user minta tambah/hapus pengingat, gunakan manageReminders.
+
+═══ DATA REALTIME ═══
 [Saldo]: Rp${formatRupiah(saldo)}
 [Stok]: ${JSON.stringify(stokObj)}
-[Transaksi Terakhir]: ${JSON.stringify(recentTrx.slice(0, 40))}
+[20 Transaksi Terakhir]: ${JSON.stringify(recentTrx.slice(0, 20))}
+${chatHistoryLines.length > 0 ? `[Riwayat Chat]:\n${chatHistoryLines.join('\n')}` : ''}
 
 Chat dari ${user.owner_name}: "${text || '[Mengirim Gambar/Struk]'}"`;
 
@@ -317,11 +443,27 @@ Chat dari ${user.owner_name}: "${text || '[Mengirim Gambar/Struk]'}"`;
         // Process stock
         if (res.updateStok && res.updateStok.length > 0) {
             for (const stk of res.updateStok) {
-                await db.upsertStock(phone, stk.nama_barang, stk.qty, stk.satuan, stk.aksi);
+                await db.upsertStock(phone, stk.nama_barang, Number(stk.qty) || 0, stk.satuan, stk.aksi);
             }
         }
 
-        if (res.reply) return smartReply(msg, res.reply);
+        // Process reminders
+        if (res.manageReminders && res.manageReminders.length > 0) {
+            for (const rm of res.manageReminders) {
+                if (rm.aksi === 'tambah' && rm.teks) {
+                    await db.addReminder(phone, rm.teks);
+                } else if (rm.aksi === 'hapus' && rm.id) {
+                    await db.deleteReminder(rm.id);
+                }
+            }
+        }
+
+        // Save chat history
+        await db.addChatHistory(phone, 'user', text || '[Gambar/Struk]');
+        if (res.reply) {
+            await db.addChatHistory(phone, 'bot', res.reply.substring(0, 500));
+            return smartReply(msg, res.reply);
+        }
     } catch (err) {
         console.error('[GEMINI ERROR]', err.message);
         return smartReply(msg, '❌ Error AI. Coba format manual:\n*masuk 50k jual rokok*');
@@ -376,8 +518,8 @@ client.on('message_create', async msg => {
 
 // ═══ HANDLE INCOMING MESSAGES FROM WARUNG ═══
 client.on('message', async msg => {
-    if (!msg.body || msg.fromMe) return;
-    if (botSentMessages.has(msg.body.trim())) return;
+    if ((!msg.body && !msg.hasMedia) || msg.fromMe) return;
+    if (msg.body && botSentMessages.has(msg.body.trim())) return;
     if (msg.from.endsWith('@g.us')) return; // Ignore groups
 
     let phone = msg.from.replace('@c.us', '').replace('@lid', '');
@@ -387,22 +529,24 @@ client.on('message', async msg => {
             phone = contact.number;
         }
     } catch (e) {}
-    const text = msg.body.trim();
-    console.log(`[MSG] ${phone}: ${text}`);
+    const text = (msg.body || '').trim();
+    console.log(`[MSG] ${phone}: ${text || '[MEDIA]'}`);
 
     try {
-        // Check session for registration flow
+        // Check session for registration & persona change flows
         const session = await db.getSession(phone);
-        if (session && session.state && session.state.startsWith('reg_')) {
-            const handled = await handleRegistration(msg, phone, text, session);
-            if (handled) return;
+        if (session && session.state) {
+            const s = session.state;
+            if (s.startsWith('reg_') || s === 'change_persona' || s === 'change_persona_confirm') {
+                const handled = await handleRegistration(msg, phone, text, session);
+                if (handled) return;
+            }
         }
 
         // Check user registration
         const user = await db.getUser(phone);
 
         if (!user) {
-            // Not registered - show registration menu
             if (text.toLowerCase() === 'daftar') {
                 return handleRegistration(msg, phone, text, null);
             }
@@ -412,6 +556,20 @@ client.on('message', async msg => {
         // Check if active
         if (!db.isUserActive(user)) {
             return smartReply(msg, `⏰ Masa aktif *${user.store_name}* sudah habis.\n\nUntuk perpanjang, hubungi admin:\n📱 wa.me/${config.NOMOR_ADMIN}\n\nAtau cek di:\n🌐 ${config.WEBSITE}/kasir`);
+        }
+
+        // Handle special commands
+        const lowerText = text.toLowerCase();
+
+        // Menu / Bantuan
+        if (['menu', 'bantuan', 'help', '?'].includes(lowerText)) {
+            return smartReply(msg, getHelpMenu(user.persona || 'umum'));
+        }
+
+        // Ubah persona
+        if (lowerText.includes('ubah persona') || lowerText.includes('ganti persona')) {
+            await db.setSession(phone, 'change_persona');
+            return smartReply(msg, `🎭 *Ubah Jenis Bot*\n\n${PERSONA_MENU}`);
         }
 
         // Active user - process message
