@@ -15,7 +15,7 @@ if (genAI) {
     geminiModel = genAI.getGenerativeModel({
         model: 'gemini-2.5-flash',
         generationConfig: {
-            temperature: 0.35,
+            temperature: 0.1,
             responseMimeType: 'application/json',
             responseSchema: {
                 type: SchemaType.OBJECT,
@@ -407,17 +407,22 @@ Waktu: ${getTanggalLengkap()} ${getWaktu()}
 - Sesuaikan istilah dengan jenis usaha: ${pCfg.terms}
 
 ═══ ATURAN TRANSAKSI ═══
-1. JUAL/PEMASUKAN → tipe "masuk" + KURANGI stok otomatis
-2. KULAK/BELI → tipe "keluar" + TAMBAH stok otomatis
+1. JUAL/PEMASUKAN → tipe "masuk" + buat 1 insertTransaksi + 1 updateStok (aksi "kurang")
+2. KULAK/BELI/TAMBAH STOK → tipe "keluar" + buat 1 insertTransaksi + 1 updateStok (aksi "tambah")
 3. Jika user sebut barang TANPA harga → TANYA harganya, JANGAN ngarang
-4. SELALU isi insertTransaksi DAN updateStok bersamaan jika ada barang
 
 ═══ ATURAN STOK (SANGAT PENTING!) ═══
 - PECAHAN: "½ kg" = 0.5, "setengah" = 0.5, "1/4" = 0.25, "3/4" = 0.75
 - KONVERSI: stok "kg" tapi jual "gram" → konversi (500g = 0.5kg)
 - Qty di updateStok HARUS angka desimal yang benar
 - Jika stok tidak cukup → PERINGATKAN tapi tetap proses jika user yakin
-- SELALU sertakan updateStok saat ada penjualan/pembelian barang
+
+═══ ANTI-DUPLIKAT (KRITIS!) ═══
+- Setiap barang HANYA BOLEH muncul MAKSIMAL 1x di updateStok
+- JANGAN PERNAH buat 2 entry updateStok untuk barang yang SAMA
+- Contoh BENAR: "tambah stok rokok 10pcs harga 35rb" → 1 insertTransaksi keluar 35000 + 1 updateStok tambah rokok 10 pcs
+- Contoh SALAH: membuat 2 updateStok rokok 10 pcs (ini akan bikin stok 2x lipat!)
+- Cek ulang: hitung jumlah entry di updateStok, setiap nama_barang HANYA BOLEH 1x
 
 ═══ FORMAT LAPORAN (WAJIB RAPIH!) ═══
 Gunakan format sederhana ini untuk WA:
@@ -447,7 +452,7 @@ Gunakan format sederhana ini untuk WA:
 
 ═══ GAMBAR/STRUK ═══
 - Baca SEMUA item: nama, qty, harga
-- WAJIB catat ke insertTransaksi DAN updateStok per item
+- Catat per item: 1 insertTransaksi + 1 updateStok (tetap 1 entry per barang, tidak boleh duplikat!)
 - Tampilkan rincian di reply
 
 ═══ PENGINGAT USER ═══
@@ -466,6 +471,12 @@ Chat dari ${user._staffName || user.owner_name} (${user._role === 'staff' ? 'Sta
         const requestContent = geminiImage ? [prompt, geminiImage] : prompt;
         const result = await geminiModel.generateContent(requestContent);
         const res = JSON.parse(result.response.text());
+
+        // ═══ DEBUG LOG: Lihat apa yang Gemini "pikirkan" ═══
+        console.log(`[GEMINI] ${phone} | input: "${(text || '[IMG]').substring(0, 80)}"`);
+        console.log(`[GEMINI] ${phone} | trx:${res.insertTransaksi?.length || 0} stk:${res.updateStok?.length || 0} reset:${res.aksiReset || '-'} remind:${res.manageReminders?.length || 0}`);
+        if (res.insertTransaksi?.length > 0) console.log(`[GEMINI] ${phone} | insertTransaksi:`, JSON.stringify(res.insertTransaksi));
+        if (res.updateStok?.length > 0) console.log(`[GEMINI] ${phone} | updateStok:`, JSON.stringify(res.updateStok));
 
         // Process reset
         if (res.aksiReset === 'RESET_TOTAL') {
@@ -491,9 +502,21 @@ Chat dari ${user._staffName || user.owner_name} (${user._role === 'staff' ? 'Sta
             await db.setSession(phone, curSession?.state || 'active', { ...(curSession?.data || {}), last_receipt: { items: receiptItems, total: receiptTotal } });
         }
 
-        // Process stock
+        // Process stock — DENGAN DEDUP untuk mencegah duplikasi (bug 10→20)
         if (res.updateStok && res.updateStok.length > 0) {
+            const stokMap = new Map();
             for (const stk of res.updateStok) {
+                const key = `${(stk.nama_barang || '').toLowerCase().trim()}__${(stk.satuan || 'pcs').toLowerCase().trim()}__${stk.aksi}`;
+                if (stokMap.has(key)) {
+                    console.log(`[DEDUP] ⚠️ Skip duplikat stok: ${stk.nama_barang} ${stk.qty} ${stk.satuan} (${stk.aksi}) — sudah ada entry pertama`);
+                } else {
+                    stokMap.set(key, stk);
+                }
+            }
+            if (stokMap.size < res.updateStok.length) {
+                console.log(`[DEDUP] Filtered ${res.updateStok.length} → ${stokMap.size} entries (${res.updateStok.length - stokMap.size} duplikat dihapus)`);
+            }
+            for (const stk of stokMap.values()) {
                 await db.upsertStock(phone, stk.nama_barang, Number(stk.qty) || 0, stk.satuan, stk.aksi);
             }
         }
@@ -630,6 +653,29 @@ client.on('message', async msg => {
         const user = await db.getUser(phone);
 
         if (user) {
+            // Handle web-registered users (status='pending') — aktifkan trial otomatis
+            if (user.status === 'pending') {
+                const trialEnd = moment().tz(TZ).add(config.TRIAL_HARI || 7, 'days').toISOString();
+                await db.supabase.from('users').update({
+                    status: 'trial',
+                    trial_end: trialEnd,
+                    persona: user.persona || 'warung',
+                    updated_at: new Date().toISOString()
+                }).eq('phone', phone);
+                // Set session so bot knows user is active
+                await db.setSession(phone, 'active', null);
+                user.status = 'trial';
+                user.trial_end = trialEnd;
+                console.log(`[AUTO-ACTIVATE] ${phone} (${user.store_name}) — web user activated with ${config.TRIAL_HARI || 7} day trial`);
+                // Send welcome + persona selection
+                if (!user.persona || user.persona === 'warung') {
+                    await smartReply(msg, `🎉 *Selamat datang di ${config.NAMA_BISNIS}!*\n\nHalo *${user.owner_name}*! Akun toko *${user.store_name}* sudah aktif.\n\n⏰ Trial GRATIS: *${config.TRIAL_HARI || 7} hari*\n\nPilih jenis usaha kamu dulu ya:\n\n${PERSONA_MENU}`);
+                    await db.setSession(phone, 'change_persona');
+                    return;
+                }
+                return smartReply(msg, `🎉 *Selamat datang di ${config.NAMA_BISNIS}!*\n\nHalo *${user.owner_name}*! Akun toko *${user.store_name}* sudah aktif.\n\n⏰ Trial GRATIS: *${config.TRIAL_HARI || 7} hari*\n\n${getHelpMenu(user.persona || 'warung')}`);
+            }
+
             if (!db.isUserActive(user)) {
                 return smartReply(msg, `⏰ Masa aktif *${user.store_name}* sudah habis.\n\nHubungi admin: wa.me/${config.NOMOR_ADMIN}`);
             }

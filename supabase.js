@@ -48,6 +48,8 @@ async function deleteUser(phone) {
 function isUserActive(user) {
     if (!user) return false;
     if (user.status === 'banned') return false;
+    // Pending = baru daftar via web, belum chat bot → dianggap aktif (akan di-activate saat pertama chat)
+    if (user.status === 'pending') return true;
     if (user.status === 'active' && user.paid_until) {
         return moment().tz(TZ).isBefore(moment(user.paid_until));
     }
