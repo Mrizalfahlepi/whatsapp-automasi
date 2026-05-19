@@ -1,10 +1,12 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const moment = require('moment-timezone');
 const config = require('./config');
 const db = require('./supabase');
 const { GoogleGenerativeAI, SchemaType } = require('@google/generative-ai');
+let receiptGen = null;
+try { receiptGen = require('./receipt'); } catch (e) { console.log('[WARN] receipt.js not loaded:', e.message); }
 
 // ═══ GEMINI AI SETUP ═══
 const genAI = config.GEMINI_API_KEY ? new GoogleGenerativeAI(config.GEMINI_API_KEY) : null;
@@ -131,7 +133,7 @@ const PERSONA_MAP = { '1': 'warung', '2': 'laundry', '3': 'toko_bangunan', '4': 
 
 function getHelpMenu(persona, role) {
     const p = PERSONA_LIST[persona] || PERSONA_LIST.umum;
-    let menu = `📋 *PANDUAN ${config.NAMA_BISNIS}*\n━━━━━━━━━━━━━━━━━━━\n\n💰 *Catat Pemasukan*\n_Contoh: jual rokok 50rb_\n\n💸 *Catat Pengeluaran*\n_Contoh: kulak telur 100rb 10kg_\n\n📦 *Tambah/Kurangi Stok*\n_Contoh: tambah stok rokok 100 pcs_\n\n📊 *Laporan*\n• _laporan hari ini_\n• _laporan minggu ini_\n• _laba rugi_\n• _rekap stok_\n\n📷 *Kirim Struk/Foto*\nFoto struk → kirim ke sini\n\n🔔 *Pengingat Otomatis*\n_Contoh: ingatkan jika stok rokok di bawah 10_\n\n❓ *Bantuan*\n_Ketik: menu_\n\n_Jenis: ${p.label}${role === 'staff' ? ' (Staff)' : ''}_`;
+    let menu = `📋 *PANDUAN ${config.NAMA_BISNIS}*\n━━━━━━━━━━━━━━━━━━━\n\n💰 *Catat Pemasukan*\n_Contoh: jual rokok 50rb_\n\n💸 *Catat Pengeluaran*\n_Contoh: kulak telur 100rb 10kg_\n\n📦 *Tambah/Kurangi Stok*\n_Contoh: tambah stok rokok 100 pcs_\n\n📊 *Laporan*\n• _laporan hari ini_\n• _rekap stok_\n\n🧾 *Cetak Struk*\n_Ketik: struk_\n\n📷 *Kirim Foto Struk*\nFoto struk → kirim ke sini\n\n🔔 *Pengingat*\n_Contoh: ingatkan jika stok rokok di bawah 10_\n\n❓ *Bantuan*\n_Ketik: menu_\n\n_Jenis: ${p.label}${role === 'staff' ? ' (Staff)' : ''}_`;
     if (role === 'staff') {
         menu += `\n\n🚪 *Keluar dari toko*\n_Ketik: keluar toko_`;
     }
@@ -139,7 +141,7 @@ function getHelpMenu(persona, role) {
 }
 
 function getOwnerMenu() {
-    return `👑 *MENU OWNER*\n━━━━━━━━━━━━━━━━━━━\n\n👥 *Kelola Karyawan*\n• _tambah karyawan 08xxx Nama_\n• _hapus karyawan 08xxx_\n• _list karyawan_\n\n📊 *Laporan per Staff*\n• _laporan staff Budi_\n• _laporan staff semua_\n\n🔄 *Reset Data*\n_Ketik: reset data_\n\n🎭 *Ubah Jenis Bot*\n_Ketik: ubah persona_\n\n📋 *Menu Umum*\n_Ketik: menu_`;
+    return `👑 *MENU OWNER*\n━━━━━━━━━━━━━━━━━━━\n\n👥 *Kelola Karyawan*\n• _tambah karyawan 08xxx Nama_\n• _hapus karyawan 08xxx_\n• _list karyawan_\n\n📊 *Laporan Staff*\n• _laporan staff Budi_\n• _laporan staff semua_\n\n⚙️ *Setting Profil Struk*\n_Ketik: setting_\n\n🔄 *Reset Data*\n_Ketik: reset data_\n\n🎭 *Ubah Persona*\n_Ketik: ubah persona_\n\n📋 *Menu Umum*\n_Ketik: menu_`;
 }
 
 // ═══ ADMIN COMMANDS HANDLER ═══
@@ -473,12 +475,20 @@ Chat dari ${user._staffName || user.owner_name} (${user._role === 'staff' ? 'Sta
             await db.supabase.from('transactions').delete().eq('user_phone', phone).eq('tanggal', hariIni);
         }
 
-        // Process transactions
+        // Process transactions + save receipt data
+        const receiptItems = [];
         if (res.insertTransaksi && res.insertTransaksi.length > 0) {
             const staffTag = user._staffName ? ` [${user._staffName}]` : '';
             for (const trx of res.insertTransaksi) {
                 await db.insertTransaction(phone, trx.tipe === 'masuk' ? 'masuk' : 'keluar', Number(trx.jumlah) || 0, (trx.ket || '') + staffTag);
+                if (trx.tipe === 'masuk') receiptItems.push({ nama: trx.ket || 'Item', harga: Number(trx.jumlah) || 0 });
             }
+        }
+        // Save last receipt for struk command
+        if (receiptItems.length > 0) {
+            const receiptTotal = receiptItems.reduce((a, i) => a + i.harga, 0);
+            const curSession = await db.getSession(phone);
+            await db.setSession(phone, curSession?.state || 'active', { ...(curSession?.data || {}), last_receipt: { items: receiptItems, total: receiptTotal } });
         }
 
         // Process stock
@@ -581,6 +591,39 @@ client.on('message', async msg => {
                 const handled = await handleRegistration(msg, phone, text, session);
                 if (handled) return;
             }
+            // Struk payment flow
+            if (s === 'struk_payment') {
+                const rd = session.data || {};
+                if (lowerText === 'batal') {
+                    await db.setSession(phone, 'active', null);
+                    return smartReply(msg, '❌ Struk dibatalkan.');
+                }
+                const match = text.match(/^([0-9.,]+)\s*print$/i) || (lowerText === 'print' ? ['', '0'] : null);
+                if (!match) return smartReply(msg, '❌ Format: *[jumlah] print*\n_Contoh: 150000 print_\nAtau ketik *print* jika uang pas.\nKetik *batal* untuk batal.');
+                let bayar = lowerText === 'print' ? rd.total : parseFloat(match[1].replace(/\./g, '').replace(/,/g, '.'));
+                if (bayar < rd.total) return smartReply(msg, `❌ Uang kurang! Total: Rp${formatRupiah(rd.total)}\nKetik ulang: *[jumlah] print*`);
+                const change = bayar - rd.total;
+                // Get store profile
+                const storeUser = await db.getUser(rd.ownerPhone || phone);
+                if (!receiptGen) { await db.setSession(phone, 'active', null); return smartReply(msg, '❌ Fitur struk belum tersedia di server.'); }
+                try {
+                    const imgBuf = receiptGen.generateReceipt({
+                        storeName: storeUser?.store_name || 'Toko',
+                        address: storeUser?.alamat || '',
+                        storePhone: storeUser?.no_hp_display || '',
+                        items: rd.items || [],
+                        total: rd.total, paid: bayar, change,
+                        cashier: rd.cashier || storeUser?.owner_name || 'Kasir',
+                        footer: storeUser?.footer_struk || 'Terima kasih!',
+                        date: moment().tz(TZ).format('DD/MM/YYYY HH:mm'),
+                        receiptWidth: storeUser?.ukuran_struk || '58'
+                    });
+                    const media = new MessageMedia('image/png', imgBuf.toString('base64'), 'struk.png');
+                    await msg.reply(media, undefined, { caption: `🧾 *STRUK*\nTotal: Rp${formatRupiah(rd.total)}\nBayar: Rp${formatRupiah(bayar)}\nKembali: Rp${formatRupiah(change)}` });
+                    await db.setSession(phone, 'active', null);
+                } catch (e) { console.error('[STRUK ERROR]', e); await db.setSession(phone, 'active', null); return smartReply(msg, '❌ Gagal buat struk. Coba lagi.'); }
+                return;
+            }
         }
 
         // ═══ CHECK: Is this a registered OWNER? ═══
@@ -672,6 +715,35 @@ client.on('message', async msg => {
                 }
             }
 
+            // --- SETTINGS PROFIL ---
+            if (lowerText === 'setting' || lowerText === 'setting profil') {
+                return smartReply(msg, `⚙️ *SETTING PROFIL STRUK*\n━━━━━━━━━━━━━━━━\n🏪 Nama: *${user.store_name}*\n📍 Alamat: *${user.alamat || '(belum diisi)'}*\n📱 HP: *${user.no_hp_display || '(belum diisi)'}*\n📝 Footer: *${user.footer_struk || 'Terima kasih!'}*\n📐 Ukuran: *${user.ukuran_struk || '58'}mm*\n\n_Ubah dengan:_\n• setting nama [nama toko]\n• setting alamat [alamat]\n• setting hp [nomor]\n• setting footer [teks]\n• setting ukuran [58/80]`);
+            }
+            if (lowerText.startsWith('setting ') && !lowerText.startsWith('setting profil')) {
+                const setParts = text.split(/\s+/);
+                const setKey = (setParts[1] || '').toLowerCase();
+                const setVal = setParts.slice(2).join(' ');
+                if (!setVal) return smartReply(msg, '❌ Format: *setting [field] [nilai]*');
+                const fieldMap = { nama: 'store_name', alamat: 'alamat', hp: 'no_hp_display', footer: 'footer_struk', ukuran: 'ukuran_struk' };
+                const dbField = fieldMap[setKey];
+                if (!dbField) return smartReply(msg, '❌ Field tidak dikenal. Pilih: nama, alamat, hp, footer, ukuran');
+                if (setKey === 'ukuran' && !['58', '80'].includes(setVal)) return smartReply(msg, '❌ Ukuran hanya 58 atau 80 (mm)');
+                await db.updateUserProfile(phone, { [dbField]: setVal });
+                return smartReply(msg, `✅ ${setKey} diubah ke: *${setVal}*`);
+            }
+
+            // --- STRUK COMMAND ---
+            if (lowerText === 'struk') {
+                const ses = await db.getSession(phone);
+                const lr = ses?.data?.last_receipt;
+                if (!lr || !lr.items || lr.items.length === 0) return smartReply(msg, '❌ Tidak ada transaksi terbaru.\nLakukan transaksi dulu, lalu ketik *struk*.');
+                let konfirmasi = `🧾 *KONFIRMASI STRUK*\n━━━━━━━━━━━━━━━━\n`;
+                lr.items.forEach(i => { konfirmasi += `• ${i.nama}  Rp${formatRupiah(i.harga)}\n`; });
+                konfirmasi += `━━━━━━━━━━━━━━━━\n💰 *TOTAL: Rp${formatRupiah(lr.total)}*\n\n_Input uang pelanggan:_\n• *150000 print* → hitung kembalian\n• *print* → uang pas\n• *batal* → batalkan`;
+                await db.setSession(phone, 'struk_payment', { ...lr, ownerPhone: phone, cashier: user.owner_name });
+                return smartReply(msg, konfirmasi);
+            }
+
             // Owner - normal message
             await handleWarungMessage(msg, phone, text, user);
             return;
@@ -697,6 +769,18 @@ client.on('message', async msg => {
             if (lowerText === 'keluar toko') {
                 await db.removeStaffByPhone(phone);
                 return smartReply(msg, `👋 Kamu sudah keluar dari *${owner.store_name}*.\n\nKetik *DAFTAR* jika ingin buat toko sendiri.`);
+            }
+
+            // Staff struk command
+            if (lowerText === 'struk') {
+                const ses = await db.getSession(staffInfo.owner_phone);
+                const lr = ses?.data?.last_receipt;
+                if (!lr || !lr.items || lr.items.length === 0) return smartReply(msg, '❌ Tidak ada transaksi terbaru.');
+                let konfirmasi = `🧾 *KONFIRMASI STRUK*\n━━━━━━━━━━━━━━━━\n`;
+                lr.items.forEach(i => { konfirmasi += `• ${i.nama}  Rp${formatRupiah(i.harga)}\n`; });
+                konfirmasi += `━━━━━━━━━━━━━━━━\n💰 *TOTAL: Rp${formatRupiah(lr.total)}*\n\n_Input uang:_\n• *150000 print*\n• *print* → uang pas\n• *batal*`;
+                await db.setSession(phone, 'struk_payment', { ...lr, ownerPhone: staffInfo.owner_phone, cashier: staffInfo.staff_name });
+                return smartReply(msg, konfirmasi);
             }
 
             // Staff → route to owner's store data

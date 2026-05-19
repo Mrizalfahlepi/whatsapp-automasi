@@ -200,6 +200,12 @@ async function getStaffTransactions(ownerPhone, staffName) {
     return data || [];
 }
 
+// ═══ STORE PROFILE ═══
+async function updateUserProfile(phone, fields) {
+    fields.updated_at = new Date().toISOString();
+    await supabase.from('users').update(fields).eq('phone', phone);
+}
+
 module.exports = {
     supabase, getUser, registerUser, getAllUsers, updateUserStatus, updateUserPersona, deleteUser, isUserActive,
     getTransactions, insertTransaction, getSaldo, deleteTransactions,
@@ -207,5 +213,6 @@ module.exports = {
     getSession, setSession, deleteSession,
     getChatHistory, addChatHistory,
     getReminders, addReminder, deleteReminder,
-    getStaffByPhone, getStaffList, addStaff, removeStaff, removeStaffByPhone, getStaffTransactions
+    getStaffByPhone, getStaffList, addStaff, removeStaff, removeStaffByPhone, getStaffTransactions,
+    updateUserProfile
 };
